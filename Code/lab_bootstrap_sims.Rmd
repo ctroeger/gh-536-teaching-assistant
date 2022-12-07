@@ -1,0 +1,318 @@
+---
+title: "Bootstrap Simulations"
+author: "Chris Troeger"
+date: "2/24/2022"
+output: html_document
+---
+
+```{r, warning = F, message = F}
+library(data.table)
+library(ggplot2)
+library(parameters)
+library(gridExtra)
+library(MASS)
+library(viridis)
+library(GGally)
+library(boot)
+
+set.seed(14)
+
+## Intro to rnorm, mvrnorm
+mean_vals <- c(10, 0)
+vars <- c(2, 5)
+
+x1 <- rnorm(1000, mean_vals[1], vars[1]^2)
+hist(x1)
+
+x2 <- rnorm(1000, mean_vals[2], vars[2]^2)
+hist(x2)
+
+ggplot(data.frame(x1, x2), aes(x = x1, y = x2)) + geom_point() +
+  theme_classic() + stat_density_2d(aes(fill = ..level..), geom="polygon") + scale_fill_viridis(alpha = 0.7) + 
+  guides(fill = "none") + ggtitle("Independent")
+
+covs <- 2
+var_cov <- matrix(c(vars[1], covs, covs, vars[2]), nrow = 2)
+
+draws <- mvrnorm(1000, mean_vals, var_cov)
+draws <- as.data.frame(draws)
+
+ggplot(draws, aes(x = V1, y = V2)) + theme_classic() + geom_point() +
+  stat_density_2d(aes(fill = ..level..), geom="polygon") + scale_fill_viridis(alpha = 0.7) + 
+  guides(fill = "none") + ggtitle("Conditional (multivariate)")
+
+## Info
+cov(x1, x2)
+cor(x1, x2)
+
+cov(draws$V1, draws$V2)
+cor(draws$V1, draws$V2)
+
+cv <- cov(draws$V1, draws$V2)
+p <- cv / sd(draws$V1) / sd(draws$V2)
+p
+
+cv <- cor(draws$V1, draws$V2) * sd(draws$V1) * sd(draws$V2)
+cv
+
+## Make a function to show how changes interact
+sim_multi2 <- function(mean_vals, var_vals, cov){
+  var_cov <- matrix(c(var_vals[1], cov, cov, var_vals[2]), nrow = 2)
+  draws <- mvrnorm(1000, mean_vals, var_cov)
+  draws <- as.data.frame(draws)
+  a <- ggplot(draws, aes(x = V1, y = V2)) + theme_classic() + geom_point() +
+    stat_density_2d(aes(fill = ..level..), geom="polygon") + scale_fill_viridis(alpha = 0.7) + 
+    guides(fill = "none")
+  b <- ggplot(draws, aes(x = V1)) + geom_histogram(col = "black") + theme_classic() +
+    xlab("")
+  c <- ggplot(draws, aes(x= V2)) + geom_histogram(col = "black") + coord_flip() + theme_classic() + xlab("")
+  d <- ggplot() + theme_void()
+  
+  grid.arrange(b ,d, a, c, ncol = 2, widths = c(4, 1.4),
+               heights = c(1.4, 4))
+}
+
+sim_multi2(mean_vals, var_vals = c(4, 25), cov = 5)
+```
+
+
+## Application from a model
+
+```{r, echo = F, eval = F}
+zt <- fread("C:/Users/ctroeger/OneDrive - UW/PhD/GH Teaching Assistant/Data/zamstar.csv")
+
+t <- zt[, lapply(.SD, function(x) sum(x)),
+        .SDcols = c("d","n"),
+        by = c("ecf","hh")]
+t[, incidence := d / n]
+t
+
+mod0 <- glm(d ~ offset(log(n)) + country + hh*ecf, data = zt, family = poisson)
+
+summary(mod0)
+
+pred_zt <- expand.grid(country = c(1,2),
+                       #strata_tst = c(0,1),
+                       hh = c(0,1),
+                       ecf = c(0,1),
+                       n = 1000)
+pred_zt$name <- paste0(ifelse(pred_zt$country == 1, "Zambia", "South Africa"),
+                 #", ", ifelse(pred_zt$strata_tst == 0, "Low risk", "High risk"),
+                 ", ", ifelse(pred_zt$hh == 0, "No HH","HH"),
+                 ", ", ifelse(pred_zt$ecf == 0, "No ECF","ECF"))
+
+pred_mod <- predict(mod0, newdata = pred_zt, se.fit = T)
+
+pred_zt$prediction <- pred_mod[[1]]
+pred_zt$se <- pred_mod[[2]]
+
+# Prediction and SE are in log space
+pred_zt$lin_pred <- exp(pred_zt$prediction)
+pred_zt$lower <- exp(pred_zt$prediction - pred_zt$se * qnorm(0.975))
+pred_zt$upper <- exp(pred_zt$prediction + pred_zt$se * qnorm(0.975))
+
+# Let's convert to an incidence
+pred_zt <- data.table(pred_zt)
+pred_zt[, c("lin_pred","lower","upper") := 
+          lapply(.SD, function(x) x/n),
+        .SDcols = c("lin_pred","lower","upper")]
+
+
+zt <- merge(zt, pred_zt, by = c("country","hh","ecf"))
+
+ggplot(pred_zt, aes(x = name, y = lin_pred, ymin = lower, ymax = upper)) +
+  geom_point(size = 3) +
+  geom_errorbar(width = 0) +
+  coord_flip() +
+  geom_point(data = zt, aes(y = d/n.x, size = n.x), col = "purple", alpha = 0.4) +
+  guides(size = "none") +
+  theme_classic() + xlab("") + ylab("Incidence")
+
+mean_vals <- coef(mod0)
+varcov <- vcov(mod0)
+
+draws <- mvrnorm(1000, mean_vals, varcov)
+draws <- as.data.frame(draws)
+
+ggpairs(draws)
+
+# Simulate 1000 draws from the distribution
+draws <- mvrnorm(1000, mean_vals, varcov)
+
+# What is this object? It is 1000 rows and 8 cols
+dim(draws)
+
+# Each column is a coefficient from the model (named in object)
+# while each row is a conditional realization of the coefficient
+# (depends on itself and other variables in the model)
+coef(mod0)[1]
+mean(draws[,1])
+
+# What do we do with this? 
+# Let's say we want to know if the effect of the intervention is statistically significant in South Africa (country = 2) and in the high risk strata (strata = 1)
+# Create our values. Make sure they are ordered the same as the draws
+colnames(draws)
+my_counterfactual <- data.table(intercept = 1,
+                                country = c(1, 1),
+                                ecf = c(0, 0),
+                                hh = c(0, 1),
+                                country_strata = 1,
+                                ecf_hh = c(0, 0))
+my_counterfactual
+
+intervention <- data.table()
+control <- data.table()
+
+for(i in 1:1000){
+  control <- rbind(control,
+                   draws[i,] * my_counterfactual[1,])
+  intervention <- rbind(intervention,
+                        draws[i,] * my_counterfactual[2,])
+  
+}
+
+# Now we can sum up terms to get the predicted value by draw
+pred_control <- rowSums(control)
+pred_intervention <- rowSums(intervention)
+
+# Find the difference
+pred_difference <- pred_control - pred_intervention
+
+ggplot(rbind(data.table(v1 = pred_control)[, type := "No ECF"], 
+             data.table(v1 = pred_intervention)[, type := "ECF"]), aes(x = type, y = exp(v1))) + geom_boxplot()
+
+# Does the 95% CI cross 0?
+mean_diff <- mean(exp(pred_difference))
+lower_diff <- quantile(exp(pred_difference), 0.025)
+upper_diff <- quantile(exp(pred_difference), 0.975)
+res <- data.table(mean_diff, lower_diff, upper_diff)
+
+res
+```
+
+### Ghana data
+
+```{r}
+dt <- fread("C:/Users/ctroeger/OneDrive - UW/PhD/GH Teaching Assistant/Data/gha_bednet.csv")
+dt[, sex := factor(sex, levels = c(0,1), labels = c("Female","Male"))]
+
+mod2 <- glm(outcome ~ offset(log(follyr)) + bednet*agegp + sex, data = dt, family = poisson)
+print_md(model_parameters(mod2, exponentiate = T))
+```
+
+Interpreting coefficients from interaction terms can be tricky.
+
+* `intercept` = incidence of malaria when `bednet = 0, agegp = 0, sex = "Female"`
+* `bednet` = decrease in risk of malaria when `bednet = 1"`
+* `agegp` = decrease in risk of malaria for each 1 unit increase in `agegp` when `bednet = 0`
+* `sexMale` = decrease in risk of malaria when `sex = "Male"`
+* `bednet:agegp` = increase in risk of malaria for each 1 unit increase in `agegp` when `bednet = 1`
+
+### Compare predictions 
+
+```{r}
+
+pred_dt <- expand.grid(agegp = 0:4,
+                       sex = c("Male","Female"),
+                       bednet = c(0,1),
+                       follyr = 1)
+
+# predict model with interaction
+pred_dt$pred <- predict(mod2, newdata = pred_dt)
+
+ggplot(pred_dt, aes(x = agegp, y = pred, col = factor(bednet), lty = sex)) + geom_line() +
+  theme_classic() + ggtitle("Interaction model", subtitle = "Log-space")
+
+ggplot(pred_dt, aes(x = agegp, y = exp(pred), col = factor(bednet), lty = sex)) + geom_line() + 
+  theme_classic() + ggtitle("Interaction model", subtitle = "Linear-space")
+
+# Predict uncertainty
+
+pred_ci <- predict(mod2, newdata = pred_dt, se.fit = T)
+
+pred_dt$pred_lower <- pred_ci[[1]] - pred_ci[[2]] * qnorm(0.975)
+pred_dt$pred_upper <- pred_ci[[1]] + pred_ci[[2]] * qnorm(0.975)
+
+ggplot(pred_dt[pred_dt$sex == "Female",], aes(x = agegp, y = exp(pred))) + geom_line(aes(col = factor(bednet))) + facet_wrap(~sex) + geom_ribbon(aes(ymin = exp(pred_lower), ymax = exp(pred_upper), fill = factor(bednet)), alpha = 0.3) +
+  guides(fill = "none") +
+  theme_classic() + ggtitle("Interaction model", subtitle = "Log-space")
+
+# So maybe we want to know if the risk of mortality is different when children are in each age group between bednet and non-bednet.
+# Let's start with a single example. Is the risk of mortality different in age group 0?
+mean_vals <- coef(mod2)
+varcov <- vcov(mod2)
+
+# Simulate 1000 draws from the distribution
+draws <- mvrnorm(1000, mean_vals, varcov)
+draws <- as.data.frame(draws)
+ggpairs(draws)
+
+# What is this object? It is 1000 rows and 5 cols
+dim(draws)
+head(draws)
+
+# Each column is a coefficient from the model (named in object)
+# while each row is a conditional realization of the coefficient
+# (depends on itself and other variables in the model)
+coef(mod2)
+colMeans(draws)
+
+# What do we do with this? 
+draws <- as.data.table(draws)
+colnames(draws)
+
+pred_dt <- data.table(pred_dt)
+my_cf1 <- pred_dt[sex == "Female" & agegp == 0]
+
+# Modify to match our coefficients
+my_cf1$sexMale <- 0
+
+# Think conceptually about what we want
+draw1 <- draws[1,]
+realization1 <- draw1$`(Intercept)` +  # always get intercept
+  draw1$bednet * my_cf1$bednet + # multiply by bednet (0/1)
+  draw1$agegp * my_cf1$agegp + # multiply by agegp (0 in this example)
+  draw1$sexMale * my_cf1$sexMale + # multiply by sex (only Male == 0)
+  draw1$`bednet:agegp` * my_cf1$bednet * my_cf1$agegp # multiply by bednet and agegp
+
+realization1
+
+# So that is length 2 (number of rows of my_cf1)
+
+r1 <- draws$`(Intercept)` +  # always get intercept
+  draws$bednet * my_cf1[1]$bednet + # multiply by bednet (0/1)
+  draws$agegp * my_cf1[1]$agegp + # multiply by agegp (0 in this example)
+  draws$sexMale * my_cf1[1]$sexMale + # multiply by sex (only Male == 0)
+  draws$`bednet:agegp` * my_cf1[1]$bednet * my_cf1[1]$agegp # multiply by bednet and agegp
+
+head(r1)
+
+r2 <- draws$`(Intercept)` +  # always get intercept
+  draws$bednet * my_cf1[2]$bednet + # multiply by bednet (0/1)
+  draws$agegp * my_cf1[2]$agegp + # multiply by agegp (0 in this example)
+  draws$sexMale * my_cf1[2]$sexMale + # multiply by sex (only Male == 0)
+  draws$`bednet:agegp` * my_cf1[2]$bednet * my_cf1[2]$agegp # multiply by bednet and agegp
+
+head(r2)
+
+ggplot(rbind(data.table(y = r1)[, type := "No bednet"],
+             data.table(y = r2)[, type := "Bednet"]), 
+       aes(x = type, y = y)) + geom_boxplot() +
+  geom_point(alpha = 0.2) + theme_classic()
+
+# Is this difference statistically significant?
+r_diff <- r1 - r2
+mean(r_diff)
+quantile(r_diff, 0.025)
+quantile(r_diff, 0.975)
+
+ggplot(rbind(data.table(y = r1)[, type := "No bednet"],
+             data.table(y = r2)[, type := "Bednet"]), 
+       aes(x = y, fill = type)) + geom_density(alpha = 0.3) +
+  theme_classic()
+
+ggplot(data.table(x = r_diff), aes(x = r_diff)) + geom_density(fill = "gray") +
+  theme_classic() + geom_vline(xintercept = 0)
+
+# Yes it is!!
+```

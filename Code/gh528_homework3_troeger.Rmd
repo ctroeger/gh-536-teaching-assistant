@@ -1,0 +1,442 @@
+---
+title: "GH 536 Homework 3"
+author: "Chris Troeger"
+date: "2/17/2022"
+output: html_document
+---
+
+# Background to Question 1.
+
+Consider the MEMA kwa Vijana adolescent sexual health intervention in Tanzania. 20 rural communities were grouped into three strata expected to have high, medium, or low risk of HIV and other STIs. Half the communities in each stratum were assigned to receive the intervention versus standard education. The trial captured individual-level responses on knowledge, attitudes, sexual behavior, HIV incidence, STI incidence, and pregnancy. The data needed for this assignment is mkvtrial.tab and contains data collected from male participants at follow-up and focuses on knowledge regarding HIV acquisition.
+For this dataset,
+
+* community – community number: 1-20
+* arm – treatment arm: 0=control, 1=intervention
+* stratum – stratum level:1-3
+* ethnicgp – 0=non-sukuma, 1=sumuma
+* lifepart – lifetime partners at baseline: 0=0, 1=1, 2=2, 3=3+
+* agegp – age-group at follow-up: 1=16-17, 2=18, 3=19+
+* know – good knowledge of HIV acquisition at follow-up: 0=no, 1=yes
+* id – individual number
+
+The authors report a RR of 1.44 (95% CI of 1.25, 1.67) for the impact of intervention on knowledge of HIV acquisition for young men (Table 3). 
+
+1. **Conduct an individual-level analysis using a mixed effects regression model accounting for both community and stratum, and compare your results (and approach) to that presented in the publication.**   
+
+2. **Further, investigate whether the number of lifetime partners at baseline results in a different effect estimate for the intervention by including an interaction term for this variable.** 
+
+Feel free to include or ignore the other covariates.
+
+```{r, include = F}
+#######################################################
+## Packages
+#######################################################
+
+library(data.table)
+library(lme4)
+library(ggplot2)
+library(arm)
+library(boot)
+library(texreg)
+library(sjPlot)
+library(parameters)
+library(knitr)
+
+dt <- fread("C:/Users/ctroeger/OneDrive - UW/PhD/GH Teaching Assistant/Data/mkvtrial.csv")
+```
+
+### Part 1
+
+There are several models one could use to evaluate the relative risk of good knowledge of HIV acquisition in the treatment compared to control arms of this study but I expect most of them would have this general structure:
+
+$$
+y_i = \beta_0 + \alpha_{0j,i} + \beta_1Stratum_i + \beta_2Arm_i + \epsilon_i
+$$
+
+Where $y_i$ is the knowledge of HIV acquisition for individual $i$, $\beta_0$ is the intercept term, $\beta_1$ is a fixed effect for stratum, $\beta_2$ is the primary effect of interest, whether individual $i$ is in the treatment or control arm, $\epsilon_i$ is the error term, and $\alpha_{0j,i}$ is a random intercept term for community $j$.
+
+We know our outcome variable is binary {0,1} so either a logistic regression model or a log-binomial model would be appropriate to analyze the data. 
+
+```{r, echo = F}
+## Function to extract fixed effects and exponentiate
+format_results <- function(model){
+  if(class(model)[1] %like% "lmer"){
+    f <- fixef(model)
+    beta <- names(fixef(model))
+  } else {
+    f <- coef(model)
+    beta <- names(coef(model))
+  }
+  se <- sqrt(diag(vcov(model)))
+  m <- exp(f)
+  l <- exp(f - se * qnorm(0.975))
+  u <- exp(f + se * qnorm(0.975))
+  out <- data.table(beta,
+                    mean = m,
+                    lower = l,
+                    upper = u)
+  return(out)
+}
+```
+
+Here I show both. 
+
+```{r}
+## I ran a log-binomial model
+# This model returns beta estimates in log-relative risk
+# stratum is categorical
+mod1_lb <- glmer(know ~ arm + factor(stratum) + (1|community), data = dt, 
+              family = binomial(link = "log"))
+sum_mod1 <- format_results(mod1_lb)
+
+## One could also run a logistic regression model
+# This model returns beta estimates in log-odds 
+mod1_lg <- glmer(know ~ arm + factor(stratum) + (1|community), data = dt, 
+              family = binomial)
+sum_mod1_lg <- format_results(mod1_lg)
+```
+
+```{r, echo = F}
+sum_mod1$beta <- c("Intercept","Intervention arm","Stratum2","Stratum3")
+kable(sum_mod1, col.names = c("Parameter","Estimate",
+                              "Lower bound", "Upper bound"),
+      caption = "Fixed effect relative risk parameter estimates", digits = 2)
+
+sum_mod1_lg$beta <- c("Intercept","Intervention arm","Stratum2","Stratum3")
+kable(sum_mod1_lg, col.names = c("Parameter","Estimate",
+                              "Lower bound", "Upper bound"),
+      caption = "Fixed effect odds ratio parameter estimates", digits = 2)
+```
+
+This approach is different from the one used in the manuscript. In the manuscript, the analysis is a logistic regression model for all individuals but not accounting for the study arm.
+
+$$
+y_i = \beta_0 + \beta_1Stratum_i + ... \epsilon_i
+$$
+
+Where $...$ represents "predefined adjustment factors". The Authors then used this model to estimate an *expected* knowledge of HIV acquisition count by community and then determined a relative risk from dividing the *observed* knowledge score by this expected value. They estimated uncertainty from these ratios using ANOVA tests. 
+
+```{r}
+## Analysis from paper
+# Run individual level analysis, not accounting for arm
+paper_mod <- glm(know ~ factor(stratum) + ethnicgp + factor(agegp),
+                 data = dt, family = binomial(link = "log"))
+# Predict onto individuals the probability that know == 1
+dt$paper_pred <- exp(predict(paper_mod))
+# Aggregate observed and predicted (expected) to community, stratum, arm
+tab_dt <- dt[, lapply(.SD, function(x) sum(x)),
+             .SDcols = c("know","paper_pred"),
+             by = c("community", "arm","stratum")]
+# Find ratio
+tab_dt[, o_e := know / paper_pred]
+# The found "geometric" mean (this is the mean of the log-transformed datat)
+tab_dt[, log_o_e := log(o_e)]
+
+# The relative risk is the exponents of the means of arm == 1 to arm == 0
+exp(mean(tab_dt[arm == 1]$log_o_e)) / exp(mean(tab_dt[arm == 0]$log_o_e))
+```
+
+The authors said they ran an ANOVA to get the standard errors. How would we do that?
+
+```{r}
+summary(aov(log_o_e ~ arm + stratum, data = tab_dt))
+```
+
+That's nice but not how I like interpreting results. Fortunately for us, a one-way ANOVA is the same as a linear model for categorical variables!
+
+```{r}
+lin_mod <- lm(log_o_e ~ arm + factor(stratum), data = tab_dt)
+summary(lin_mod)
+kable(format_results(lin_mod))
+
+```
+
+Compare that with the values reported in the paper...
+
+```{r, echo = F}
+kable(data.table(mean = 1.44, lower = 1.25, upper = 1.67),
+      col.names = c("Study estimate","Lower bound","Upper bound"),
+      caption = "Reported risk ratio estimate of knowledge of HIV acquisition in intervention to control arm")
+```
+
+
+### Part 2
+
+The question also asks for an investigation of lifetime sexual partners at baseline as an interaction term with arm. 
+
+I can think of several possible models (log-binomial and logistic) and two ways to think about the `lifepart` variable. 
+
+What do we know about this new variable? We know that this variable is continuous 0, 1, 2 but at 3, it becomes 3 *or more*. Do we think that the probability of good knowledge should be linearly associated with partners?
+
+```{r}
+## Refactor lifepart as we don't know that there is a linear change with partners?
+dt[, partners := factor(lifepart, levels = c(0, 1, 2, 3),
+                        labels = c("None","One","Two","Three or more"))]
+
+partners_dt <- dt[, lapply(.SD, function(x) mean(x)),
+                  .SDcols = "know",
+                  by= c("arm","partners")]
+ggplot(partners_dt, aes(x = partners, y = know, fill = factor(arm))) + 
+  theme_classic() + 
+  geom_bar(stat = "identity", position = position_dodge(width = 0.9)) + 
+  ggtitle("Good knowledge and lifetime sexual partners")
+```
+
+```{r}
+mod2 <- glmer(know ~ arm*partners + factor(stratum) + (1|community), data = dt, 
+              family = binomial(link = "logit"))
+```
+
+```{r, echo = F}
+sum_mod2 <- format_results(mod2)
+print_md(model_parameters(mod2, exponentiate = T))
+```
+
+We could also run this model with `lifepart` as a continuous variable. 
+
+```{r}
+mod2b <- glmer(know ~ arm*lifepart + factor(stratum) + (1|community), data = dt, 
+              family = binomial(link = "logit"))
+```
+
+```{r, echo = F}
+print_md(model_parameters(mod2b, exponentiate = T))
+```
+
+Although I don't think that `lifepart` should be continuous, it does make it easier to think about our interaction terms and what they mean. Let's investigate from a prediction.
+
+```{r}
+lpred <- expand.grid(arm = 0:1,
+                     stratum = 1:3, 
+                     lifepart = 1:3,
+                     community = 21)
+lpred$pred <- predict(mod2b, newdata = lpred, 
+                 allow.new.levels = T) # This is required for predicting a random intercept that isn't in the model. Why do I want to do this?
+
+# The model is logistic regression so I want to inv.logit() to get the probability of good knowledge
+lpred$pred <- inv.logit(lpred$pred)
+
+ggplot(lpred, aes(x = lifepart, y = pred, lty = factor(arm), col = factor(stratum))) +
+  geom_line() +
+  scale_color_discrete("Stratum") +
+  scale_linetype("Arm") + 
+  theme_classic() + 
+  xlab("Life partners") + ylab("Probability")
+```
+
+Maybe we want to use the log link again but this model doesn't run. Can we figure out why?
+
+```{r}
+# mod2c <- glmer(know ~ arm*partners + factor(stratum) + (1|community), data = dt, 
+#               family = binomial(link = "log"))
+```
+
+This question thread seems to have an answer for us: https://stat.ethz.ch/pipermail/r-sig-mixed-models/2016q1/024453.html 
+
+I believe it has to do with communities that don't have one of the level of arm*lifepart interaction. 
+
+```{r}
+dt$arm_partner <- paste0(dt$arm, "_", dt$partners)
+table(dt[community <= 10]$community, dt[community <= 10]$arm_partner)
+```
+
+This last log-binomial version does, however, because it considers `lifepart` as a continuous variable (I think this is a poor assumption though).
+
+```{r}
+mod2d <- glmer(know ~ arm*lifepart + factor(stratum) + (1|community), data = dt, 
+              family = binomial(link = "log"))
+```
+
+```{r, echo = F}
+print_md(model_parameters(mod2d, exponentiate = T))
+```
+
+\pagebreak
+# Background to Question 2.
+
+Consider the ZAMSTAR data (zamstar.tab). The authors of the study recommended looking at interactions between strata & country, the community intervention and country, and the household intervention and country. If we consider country to be a second stratification, we may want to look into three way interactions between country, strata, and the intervention of interest. Conduct a cluster-level analysis looking at the impact of the household intervention, but account for the potential for a three-way interaction between country, strata, and the intervention.
+
+* cid^          cluster ID: 1-25
+* country^      1=Zambia, 2=South Africa   
+* strata_tst^   0=Low TST stratum, 1=High TST stratum 
+* ecf^          enhanced case-finding intervention: 0=No, 1=Yes
+* hh^           household intervention: 0=No, 1=Yes
+* d^            number of prevalent TB cases
+* n^            number with evaluable sample
+
+## Response
+
+The model I expect to see looks like this:
+
+`glm(d ~ offset(log(n)) + country*strata_tst*hh, data = zt, family = poisson)`
+
+That is equivalent to:
+
+$$
+y_j = \beta_0 + \beta_1HH_j + \beta_2Country_j + \beta_3Stratum_j + \beta_4Country_jStratum_j +
+$$
+$$
+\beta_5Country_jHH_j + \beta_6Stratum_jHH_j + \beta_7Country_jStratum_jHH_j + \epsilon_j
+$$
+
+Where $y_j$ is the incidence ($\frac{d}{n}$) for cluster $j$,  $HH_j$ is if the household intervention occurred in cluster $j$, $\epsilon_j$ is the error term, and $Country_j$ & $Stratum_j$ are the country and stratum for cluster $j$. 
+
+The table below shows the relative risk estimates from this regression model. These results suggest no significant impact of household treatment on the outcome. 
+
+```{r, echo = F}
+#############################################################
+## Question 2.
+#############################################################
+zt <- fread("C:/Users/ctroeger/OneDrive - UW/PhD/GH Teaching Assistant/Data/zamstar.csv")
+
+mod3 <- glm(d ~ offset(log(n)) + country*strata_tst*hh, data = zt, family = poisson)
+
+
+sum_mod3 <- format_results(mod3)
+sum_mod3$order <- c(1, 3, 4, 5, 2, 6, 7, 8)
+sum_mod3$beta <- c("Intercept","Country","Stratum",
+                   "Household TB-HIV care","Country-stratum interaction",
+                   "Country-Household TB-HIV care interaction", 
+                   "Stratum-Household TB-HIV care interaction",
+                   "Country-Household TB-HIV care-Stratum interaction")
+kable(sum_mod3[,1:4], col.names = c("Parameter","Estimate",
+                                    "Lower bound", "Upper bound"),
+      caption = "Relative risk parameter estimates from ZAMSTAR cluster level analysis", 
+      digits = 2)
+
+```
+
+### Let's make some predictions to see how to interpret interaction terms
+
+I am creating a dataframe for the prediction levels and importing a CSV I prepared that is the matrix of coefficients for the model. The idea is something like this. 
+
+```{r, echo = F}
+pred_zt <- expand.grid(country = c(1,2),
+                       strata_tst = c(0,1),
+                       hh = c(0,1),
+                       n = 1000)
+                       #n = mean(zt$n))
+
+pred_zt$name <- c("Country1, Strata0, hh0 (Intercept)",
+                  "Country2, Strata0, hh0",
+                  "Country1, Strata1, hh0",
+                  "Country2, Strata1, hh0",
+                  "Country1, Strata0, hh0",
+                  "Country2, Strata0, hh1",
+                  "Country1, Strata1, hh1",
+                  "Country2, Strata1, hh1")
+```
+
+
+```{r, warning = F}
+# Manually created file of a matrix of coefficients from the model
+coef_mat <- fread("C:/Users/ctroeger/OneDrive - UW/PhD/GH Teaching Assistant/Data/zamstar_mod_coefs.csv")
+names(coef_mat) <- paste0("c_", names(coef_mat))
+
+pred_zt <- cbind(pred_zt, coef_mat)
+
+pred_zt
+```
+
+
+
+This last column should look awfully similar to our relative risk estimates!
+
+```{r, echo = F, warning = F}
+# list of point estimate and uncertainty
+pred_mod <- predict(mod3, newdata = pred_zt, se.fit = T)
+
+pred_zt$prediction <- pred_mod[[1]]
+pred_zt$se <- pred_mod[[2]]
+
+# Prediction and SE are in log space
+pred_zt$lin_pred <- exp(pred_zt$prediction)
+pred_zt$lower <- exp(pred_zt$prediction - pred_zt$se * qnorm(0.975))
+pred_zt$upper <- exp(pred_zt$prediction + pred_zt$se * qnorm(0.975))
+
+# Let's convert to an incidence
+pred_zt <- data.table(pred_zt)
+pred_zt[, c("lin_pred","lower","upper") := 
+          lapply(.SD, function(x) x/n),
+        .SDcols = c("lin_pred","lower","upper")]
+
+
+zt <- merge(zt, pred_zt, by = c("country","hh","strata_tst"))
+
+ggplot(pred_zt, aes(x = name, y = lin_pred, ymin = lower, ymax = upper)) +
+  geom_point(size = 3) +
+  geom_errorbar(width = 0) +
+  coord_flip() +
+  geom_point(data = zt, aes(y = d/n.x, size = n.x), col = "purple", alpha = 0.4) +
+  guides(size = "none") +
+  theme_classic() + xlab("") + ylab("Incidence")
+```
+
+### Example of counterfactual. 
+
+We must use a **multivariate normal** distribution. To get this, we should find the variance-covariance matrix from the model and simulate. There is a lot of background information that this simple explanation elides but here is an example.
+
+```{r}
+set.seed(8)
+library(MASS)
+
+mean_vals <- coef(mod3)
+varcov <- vcov(mod3)
+
+# Simulate 1000 draws from the distribution
+draws <- mvrnorm(1000, mean_vals, varcov)
+
+# What is this object? It is 1000 rows and 8 cols
+dim(draws)
+
+# Each column is a coefficient from the model (named in object)
+# while each row is a conditional realization of the coefficient
+# (depends on itself and other variables in the model)
+coef(mod3)[1]
+mean(draws[,1])
+
+# What do we do with this? 
+# Let's say we want to know if the effect of the intervention is statistically significant in South Africa (country = 2) and in the high risk strata (strata = 1)
+# Create our values. Make sure they are ordered the same as the draws
+colnames(draws)
+my_counterfactual <- data.table(intercept = 1,
+                                country = c(1, 1),
+                                strata = c(1, 1),
+                                hh = c(0, 1),
+                                country_strata = 1,
+                                country_hh = c(0, 1),
+                                strata_hh = c(0, 1),
+                                country_strata_hh = c(0, 1))
+my_counterfactual
+
+intervention <- data.table()
+control <- data.table()
+
+for(i in 1:1000){
+  control <- rbind(control,
+                   draws[i,] * my_counterfactual[1,])
+  intervention <- rbind(intervention,
+                        draws[i,] * my_counterfactual[2,])
+  
+}
+
+# Now we can sum up terms to get the predicted value by draw
+pred_control <- rowSums(control)
+pred_intervention <- rowSums(intervention)
+
+# Find the difference
+pred_difference <- pred_control - pred_intervention
+
+# Does the 95% CI cross 0?
+mean_diff <- mean(pred_difference)
+lower_diff <- quantile(pred_difference, 0.025)
+upper_diff <- quantile(pred_difference, 0.975)
+
+```
+
+**The effect of the household intervention on TB prevalence in South Africa among people in the high-risk stratum is not statistically significant (`r round(mean_diff, 2)`, 95% CI `r paste0(round(lower_diff, 2), " to ", round(upper_diff,2))`)**
+
+\pagebreak
+# Code appendix
+```{r ref.label=knitr::all_labels(), echo=TRUE, eval=FALSE}
+```

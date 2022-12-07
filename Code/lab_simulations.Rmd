@@ -1,0 +1,639 @@
+---
+title: "Uncertainty Simulations"
+author: "Chris Troeger"
+date: "`r format(Sys.Date(), '%d %B, %Y')`"
+output: html_document
+---
+
+```{r, warning = F, message = F}
+library(data.table)
+library(ggplot2)
+library(parameters)
+library(gridExtra)
+library(MASS)
+library(viridis)
+library(GGally)
+library(knitr)
+library(boot)
+
+set.seed(14)
+```
+
+# Monte Carlo Simulations
+
+"A Monte Carlo simulation is a model used to predict the probability of different outcomes when the intervention of random variables is present. Monte Carlo simulations help to explain the impact of risk and uncertainty in prediction and forecasting models."
+
+In plain English, using simulations is a very useful tool for a variety of tasks regarding distributions and probability. 
+
+### Independent simulations (`rnorm`)  
+
+First, we should remind ourselves about what `rnorm`, `dnorm`, `qnorm` and `pnorm` do. 
+
+* `rnorm` is a function for finding a random observation from a normal distribution of mean and standard deviation
+* `dnorm` is the density of a normal distribution 
+* `pnorm` is the cumulative density of a normal distribution
+* `qnorm` is the standard deviation of a quantile of a normal distribution
+
+```{r, eval = F}
+# Distribution mean 0, sd 1
+rnorm(1, mean = 0, sd = 1)
+dnorm(0, mean = 0, sd = 1)
+pnorm(c(-1.96, 0, 1.96), mean = 0, sd = 1)
+qnorm(c(0.025, 0.5, 0.975), mean = 0, sd = 1)
+```
+
+
+For these simulations, we will focus on `rnorm`. There are equivalent functions for different distributions (`rbinom`, `rpois`, `rgamma`, `rbeta`). 
+
+Let's look at 1000 draws (samples) from two normal distributions. 
+
+```{r}
+## Intro to rnorm, mvrnorm
+x1 <- rnorm(1000, 0, 1)
+hist(x1)
+
+x2 <- rnorm(1000, 0, 1)
+hist(x2)
+
+ggplot(data.frame(x1, x2), aes(x = x1, y = x2)) + geom_point() +
+  theme_classic() + stat_density_2d(aes(fill = ..level..), geom="polygon") + scale_fill_viridis(alpha = 0.7) + coord_equal() + 
+  guides(fill = "none") + ggtitle("Independent")
+```
+
+And for fun, let's look at simulations from other distributions (gives us a glimpse into what those distributions look like!)
+
+```{r}
+hist(rpois(1000, 5))
+hist(rbinom(1000, 10, 0.25))
+hist(rbeta(1000, 10, 1))
+```
+
+### Dependent Simulations (`mvrnorm`)
+
+These simulations are independent. `x1` and `x2` are not associated with each other. In statistical models, it is much more common that there is some dependence between variables. We will use a different function, `mvrnorm`. This function is for **multivariate normal distributions**. The key here is that the function needs a variance-covariance matrix. 
+
+```{r}
+covs <- 1.2
+var_cov <- matrix(c(4, covs, covs, 1), nrow = 2) # note that variance is sd^2
+var_cov
+```
+
+A variance-covariance matrix is square and symmetric. The diagonal is the variance and the off diagonal is the covariance. 
+
+Let's see what happens when we create covariance in our simulated values. 
+
+```{r}
+mean_vals <- c(mean(x1), mean(x2))
+var_cov <- matrix(c(var(x1), covs, covs, var(x2)), nrow = 2)
+var_cov
+
+draws <- mvrnorm(1000, mean_vals, var_cov)
+draws <- as.data.frame(draws)
+
+ggplot(draws, aes(x = V1, y = V2)) + theme_classic() + geom_point() +
+  stat_density_2d(aes(fill = ..level..), geom="polygon") + scale_fill_viridis(alpha = 0.7) + 
+  coord_equal() + 
+  guides(fill = "none") + ggtitle("Conditional (multivariate)")
+
+## Validation
+valid <- data.table(distribution = c("x1", "x2"),
+                    independent_mean = c(mean(x1), mean(x2)),
+                    dependent_mean = c(mean(draws$V1), mean(draws$V2)),
+                    independent_sd = c(sd(x1), sd(x2)),
+                    dependent_sd = c(sd(draws$V1), sd(draws$V2)))
+kable(valid)
+
+cov(x1, x2)
+cor(x1, x2)
+
+cov(draws$V1, draws$V2)
+cor(draws$V1, draws$V2)
+
+# Convert from covariance to correlation
+cv <- cov(draws$V1, draws$V2)
+p <- cv / sd(draws$V1) / sd(draws$V2)
+p
+
+# Convert from correlation to covariance
+cv <- cor(draws$V1, draws$V2) * sd(draws$V1) * sd(draws$V2)
+cv
+
+```
+
+I'm going to write a function to do a simulation and to plot the results so we can quickly change our assumptions.
+
+```{r, warning = F, message = F}
+## Make a function to show how changes interact
+sim_multi2 <- function(mean_vals, var_vals, cov){
+  var_cov <- matrix(c(var_vals[1], cov, cov, var_vals[2]), nrow = 2)
+  draws <- mvrnorm(1000, mean_vals, var_cov)
+  draws <- as.data.frame(draws)
+  a <- ggplot(draws, aes(x = V1, y = V2)) + theme_classic() + geom_point() +
+    stat_density_2d(aes(fill = ..level..), geom="polygon") + scale_fill_viridis(alpha = 0.7) + 
+    guides(fill = "none")
+  b <- ggplot(draws, aes(x = V1)) + geom_histogram(col = "black") + theme_classic() +
+    xlab("") + geom_vline(xintercept = mean(draws$V1), col = "red", lwd = 1.1, alpha = 0.3) +
+    geom_text(aes(x = mean(draws$V1), label = round(mean(draws$V1), 1), y = 10), col = "red")
+  c <- ggplot(draws, aes(x= V2)) + geom_histogram(col = "black") + coord_flip() + theme_classic() + xlab("") + geom_vline(xintercept = mean(draws$V2), col = "red", lwd = 1.1, alpha = 0.3) +
+    geom_text(aes(x = mean(draws$V2), label = round(mean(draws$V2), 1), y = 10), col = "red")
+  d <- ggplot() + theme_void()
+  
+  grid.arrange(b ,d, a, c, ncol = 2, widths = c(4, 1.4),
+               heights = c(1.4, 4))
+}
+
+sim_multi2(c(10, 0), var_vals = c(4, 1), cov = 2)
+
+sim_multi2(c(10, -3), var_vals = c(0.25, 9), cov = 1.5)
+```
+
+### Application from a model
+
+We can use Monte Carlo simulations, specifically from multivariate normal distributions, to make counterfactual scenarios from statistical models. Remember that parametric models (OLS, MLE) generally assume that variance is normally distributed (in modeled space). 
+
+I will use the **Ghana Bednet Study** data.
+
+```{r, warning = F, message = F}
+dt <- fread("C:/Users/ctroeger/OneDrive - UW/PhD/GH Teaching Assistant/Data/gha_bednet.csv")
+dt[, sex := factor(sex, levels = c(0,1), labels = c("Female","Male"))]
+
+mod2 <- glm(outcome ~ offset(log(follyr)) + bednet*agegp + sex, data = dt, family = poisson)
+print_md(model_parameters(mod2, exponentiate = T))
+```
+
+Interpreting coefficients from interaction terms can be tricky.
+
+* `intercept` = incidence of malaria when `bednet = 0, agegp = 0, sex = "Female"`
+* `bednet` = decrease in risk of malaria when `bednet = 1"`
+* `agegp` = decrease in risk of malaria for each 1 unit increase in `agegp` when `bednet = 0`
+* `sexMale` = decrease in risk of malaria when `sex = "Male"`
+* `bednet:agegp` = increase in risk of malaria for each 1 unit increase in `agegp` when `bednet = 1`
+
+I will now plot the predictions. Predictions are powerful tools and can produce standard errors of the predictions to plot/present uncertainty. 
+
+```{r}
+
+pred_dt <- expand.grid(agegp = 0:4,
+                       sex = c("Male","Female"),
+                       bednet = c(0,1),
+                       follyr = 1)
+
+# predict model with interaction
+pred_dt$pred <- predict(mod2, newdata = pred_dt)
+
+# Predict uncertainty
+
+pred_ci <- predict(mod2, newdata = pred_dt, se.fit = T)
+
+pred_dt$pred_lower <- pred_ci[[1]] - pred_ci[[2]] * qnorm(0.975)
+pred_dt$pred_upper <- pred_ci[[1]] + pred_ci[[2]] * qnorm(0.975)
+
+pred_dt
+
+ggplot(pred_dt, aes(x = agegp, y = pred, col = factor(bednet), lty = sex)) + geom_line() +
+  theme_classic() + ggtitle("Interaction model", subtitle = "Log-space")
+
+ggplot(pred_dt, aes(x = agegp, y = exp(pred), col = factor(bednet), lty = sex)) + geom_line() + 
+  theme_classic() + ggtitle("Interaction model", subtitle = "Linear-space")
+
+ggplot(pred_dt[pred_dt$sex == "Female",], aes(x = agegp, y = exp(pred))) + geom_line(aes(col = factor(bednet))) + facet_wrap(~sex) + geom_ribbon(aes(ymin = exp(pred_lower), ymax = exp(pred_upper), fill = factor(bednet)), alpha = 0.3) +
+  guides(fill = "none") +
+  theme_classic() + ggtitle("Interaction model", subtitle = "Log-space")
+```
+
+
+So maybe we want to know if the risk of mortality is different when children are in each age group between bednet and non-bednet. It seems like it could be statistically significant in the youngest age group but there is substantial overlap in the risk of mortality with and without bednets in older age groups. 
+
+Let's start with a single example. Is the risk of mortality different in age group 0?
+
+```{r}
+mean_vals <- coef(mod2)
+varcov <- vcov(mod2)
+
+# Simulate 1000 draws from the distribution
+draws <- mvrnorm(1000, mean_vals, varcov)
+draws <- as.data.frame(draws)
+ggpairs(draws)
+
+# What is this object? It is 1000 rows and 5 cols
+dim(draws)
+head(draws)
+
+# Each column is a coefficient from the model (named in object)
+# while each row is a conditional realization of the coefficient
+# (depends on itself and other variables in the model)
+coef(mod2)
+colMeans(draws)
+
+# What do we do with this? 
+draws <- as.data.table(draws)
+colnames(draws)
+```
+
+Create a counterfactual dataset
+
+```{r}
+pred_dt <- data.table(pred_dt)
+my_cf1 <- pred_dt[sex == "Female" & agegp == 0]
+my_cf1
+```
+
+Let's first do this by hand. 
+
+```{r}
+# Modify to match our coefficients
+my_cf1$sexMale <- 0
+
+# Think conceptually about what we want
+draw1 <- draws[1,]
+realization1 <- draw1$`(Intercept)` +  # always get intercept
+  draw1$bednet * my_cf1$bednet + # multiply by bednet (0/1)
+  draw1$agegp * my_cf1$agegp + # multiply by agegp (0 in this example)
+  draw1$sexMale * my_cf1$sexMale + # multiply by sex (only Male == 0)
+  draw1$`bednet:agegp` * my_cf1$bednet * my_cf1$agegp # multiply by bednet and agegp
+
+realization1
+```
+
+So that is length 2 (number of rows of my_cf1)
+
+```{r}
+
+r1 <- draws$`(Intercept)` +  # always get intercept
+  draws$bednet * my_cf1[1]$bednet + # multiply by bednet (0/1)
+  draws$agegp * my_cf1[1]$agegp + # multiply by agegp (0 in this example)
+  draws$sexMale * my_cf1[1]$sexMale + # multiply by sex (only Male == 0)
+  draws$`bednet:agegp` * my_cf1[1]$bednet * my_cf1[1]$agegp # multiply by bednet and agegp
+
+length(r1)
+head(r1)
+
+r2 <- draws$`(Intercept)` +  # always get intercept
+  draws$bednet * my_cf1[2]$bednet + # multiply by bednet (0/1)
+  draws$agegp * my_cf1[2]$agegp + # multiply by agegp (0 in this example)
+  draws$sexMale * my_cf1[2]$sexMale + # multiply by sex (only Male == 0)
+  draws$`bednet:agegp` * my_cf1[2]$bednet * my_cf1[2]$agegp # multiply by bednet and agegp
+
+head(r2)
+```
+
+Okay we now have 1000 predictions for our baseline and counterfactual scenarios. Let's plot them. I am also exponentiating them to get incidence differences. 
+
+```{r}
+r1 <- exp(r1)
+r2 <- exp(r2)
+
+ggplot(rbind(data.table(y = r1)[, type := "No bednet"],
+             data.table(y = r2)[, type := "Bednet"]), 
+       aes(x = type, y = y)) + geom_boxplot() +
+  geom_point(alpha = 0.2) + theme_classic()
+
+
+ggplot(rbind(data.table(y = r1)[, type := "No bednet"],
+             data.table(y = r2)[, type := "Bednet"]), 
+       aes(x = y, fill = type)) + geom_density(alpha = 0.3) +
+  theme_classic()
+
+ggplot(data.table(x = r1, y = r2), 
+       aes(x = x, y = y)) + geom_point(alpha = 0.3) + coord_fixed() +
+  theme_classic() + geom_abline(intercept = 0, slope = 1, col = "red")
+
+```
+
+Seems like there is a fair amount of overlap, but is it statistically significant? We can find the difference by draw and find the mean and quantiles of that distribution of differences.
+
+```{r}
+r_diff <- r1 - r2
+
+length(r_diff[r_diff < 0])
+
+m <- mean(r_diff)
+ql <- quantile(r_diff, 0.025)
+qu <- quantile(r_diff, 0.975)
+
+ggplot(data.table(x = r_diff), aes(x = r_diff)) + geom_density(fill = "skyblue") +
+  theme_classic() + geom_vline(xintercept = c(0, ql), lty = c(1, 2))
+```
+
+```{r, echo = F}
+kable(data.table(mean = m,
+                 lower = ql,
+                 upper = qu),
+      digits = 3)
+```
+
+Yes it is!! Recall this is from a Poisson model, so we can make relative risks and see if they are different from 1.
+
+```{r}
+r_rr <- r1 / r2
+m <- mean(r_rr)
+ql <- quantile(r_rr, 0.025)
+qu <- quantile(r_rr, 0.975)
+
+ggplot(data.table(x = r_rr), aes(x = r_rr)) + geom_density(fill = "skyblue") +
+  theme_classic() + geom_vline(xintercept = c(1, ql), lty = c(1, 2))
+```
+
+```{r, echo = F}
+kable(data.table(mean = m,
+                 lower = ql,
+                 upper = qu),
+      digits = 3)
+```
+
+We can build on this (i.e. write functions, create different scenarios). 
+
+```{r, eval = F}
+my_cf1$`bednet:agegp` <- my_cf1$agegp * my_cf1$bednet
+
+my_sim_cf <- function(model,    # A glm/lm model
+                      transform = "none", # should outputs be transformed
+                      type = "difference", # is either differnce or ratio
+                      reference, # dataframe for reference prediction
+                      alternative){ # dataframe for alternative prediction
+  
+  means <- coef(model)
+  varcov <- vcov(model)
+  draws <- data.table(mvrnorm(1000, means, varcov))
+  
+  variables <- names(draws)[2:length(names(draws))]
+  bvals <- reference[, ..variables] # useful because it orders like the draws data.table
+  avals <- alternative[, ..variables]
+
+  # Baseline
+  bdraws <- data.table(draws[,1])
+  for(i in 2:ncol(draws)){
+    bdraws <- cbind(bdraws, draws[, ..i] * bvals[,get(variables[i-1])])
+  }
+  bdraws <- rowSums(bdraws)
+  
+  # Alternative
+  adraws <- data.table(draws[,1])
+  for(i in 2:ncol(draws)){
+    adraws <- cbind(adraws, draws[, ..i] * avals[,get(variables[i-1])])
+  }
+  adraws <- rowSums(adraws)
+  
+  if(transform == "exp"){
+    bdraws <- exp(bdraws)
+    adraws <- exp(adraws)
+  } else if(transform == "inv.logit"){
+    bdraws <- inv.logit(bdraws)
+    adraws <- inv.logit(adraws)
+  } else if(transform != "none"){
+    message("transform must be 'none', 'exp', or 'inv.logit'!")
+    stop()
+  }
+  
+  if(type == "difference"){
+    fdraws <- bdraws - adraws
+  } else if(type == "ratio"){
+    fdraws <- bdraws / adraws
+  } else {
+    message("type must be 'difference' or 'ratio'!")
+    stop()
+  }
+  
+  out <- data.table(mean = mean(fdraws),
+                    lower = quantile(fdraws, 0.025),
+                    upper = quantile(fdraws, 0.975),
+                    type = type,
+                    transform = transform)
+  return(out)
+  
+}
+
+## More flexibility now.
+my_sim_cf(model = mod2,
+          reference = data.table(agegp = 0, sexMale = 0, bednet = 0, `bednet:agegp` = 0),
+          alternative = data.table(agegp = 0, sexMale = 0, bednet = 1, `bednet:agegp` = 0),
+          type = "ratio",
+          transform = "exp")
+
+my_sim_cf(model = mod2,
+          reference = data.table(agegp = 2, sexMale = 0, bednet = 0, `bednet:agegp` = 0),
+          alternative = data.table(agegp = 2, sexMale = 0, bednet = 1, `bednet:agegp` = 2),
+          type = "ratio",
+          transform = "exp")
+
+```
+
+### Other useful applications of Monte Carlo simulations
+
+There are other things that you can do with this type of sampling. 
+
+1. **Integration**
+
+You can integrate (area under the curve) for distributions using simulations! How much density exists in the shaded blue section?
+
+
+```{r, echo = F}
+dnorm_limit <- function(x){
+  y <- dnorm(x, 1, 10)
+  y[x >=  10] <- NA
+  return(y)
+}
+ggplot(data.table(x = rnorm(100000, 1, 10)), aes(x = x)) + geom_density() +
+  theme_classic() + stat_function(fun = dnorm_limit, geom = "area", fill = "blue", alpha = 0.3)
+```
+
+```{r}
+i <- 1000
+sims <- rnorm(i, mean = 1, sd = 10)
+integral <- sum(sims <= 10) / i
+integral
+pnorm(10, 1, 10)
+```
+
+```{r, echo = F}
+dnorm_limit <- function(x){
+  y <- dnorm(x, 1, 10)
+  y[x <= 3 | x >= 10] <- NA
+  return(y)
+}
+ggplot(data.table(x = rnorm(100000, 1, 10)), aes(x = x)) + geom_density() +
+  theme_classic() + stat_function(fun = dnorm_limit, geom = "area", fill = "blue", alpha = 0.3)
+```
+
+```{r}
+i <- 10000
+sims <- rnorm(i, mean = 1, sd = 10)
+integral <- sum(sims >= 3 & sims <= 10) / i
+integral
+
+pnorm(10, 1, 10) - pnorm(3, 1, 10)
+```
+
+2. **Approximate $\pi$**
+
+We will bound a box `{-1 to 1}`. We will use a different simulation function `runif` which simulates values from a uniform distribution.
+
+```{r}
+hist(runif(10000, min = -1, max = 1))
+```
+
+We need an x & y. We will determine which values of $x^2 + y^2$ are less than 1 (radius of circle). Then, $\pi$ is approximated as the ratio of area of the circle to area of the square.
+
+```{r}
+x <- runif(100000, -1, 1)
+y <- runif(100000, -1, 1)
+
+in_circle <- ifelse(x^2 + y^2 < 1, "Yes", "No")
+
+ggplot(data.table(x, y, in_circle), aes(x = x, y = y, col = in_circle)) +
+  geom_point(size = 0.5) + coord_fixed() + 
+  theme_classic() + scale_color_manual(values = c("gray","blue"))
+
+pi_apx <- length(in_circle[in_circle == "Yes"]) / 100000 * 4
+pi_apx
+```
+
+3. **Solve complex probability problems**
+
+There is a famous example of the limitations of intuition of probability called the Birthday paradox. It says that in a group of at least 23 people there is a greater than 50% chance that at least two people share a birthday. Let's use Monte Carlo to see if we can confirm that!
+
+Our code says, choose $p$ values in 1:365 for $p$ number of people using the function `sample`. If there are any duplicated numbers, count it as a "success". Run that 1000 times and find the percent of the time there are duplicates (shared birthdays).
+
+```{r}
+nsims <- 10000
+people <- 1:60
+birthdays <- 1:365
+
+sim_out <- data.table()
+for(p in people){
+  sims <- c()
+  for(i in 1:nsims){
+    s <- sample(birthdays, size = p, replace = T)
+    duplicates <- ifelse(duplicated(s) == T, 1, 0)
+    dups <- sum(duplicates)
+    has_dup <- ifelse(dups > 0, 1, 0)
+    sims <- c(sims, has_dup)
+  }
+  sim_out <- rbind(sim_out,
+                   data.table(people = p, probability = sum(sims) / nsims))
+}
+
+min(sim_out[probability > 0.5]$people)
+sim_out[10:30, ]
+
+ggplot(sim_out, aes(x = people, y = probability)) + geom_line() + 
+  theme_classic() + scale_y_continuous("Probability") + 
+  ggtitle("Probability that 2 or more people share a birthday") +
+  geom_hline(yintercept = 0.5, lty = 2) + 
+  geom_vline(xintercept = 23, lty = 2)
+```
+
+# End!
+
+
+```{r, echo = F, eval = F}
+zt <- fread("C:/Users/ctroeger/OneDrive - UW/PhD/GH Teaching Assistant/Data/zamstar.csv")
+
+t <- zt[, lapply(.SD, function(x) sum(x)),
+        .SDcols = c("d","n"),
+        by = c("ecf","hh")]
+t[, incidence := d / n]
+t
+
+mod0 <- glm(d ~ offset(log(n)) + country + hh*ecf, data = zt, family = poisson)
+
+summary(mod0)
+
+pred_zt <- expand.grid(country = c(1,2),
+                       #strata_tst = c(0,1),
+                       hh = c(0,1),
+                       ecf = c(0,1),
+                       n = 1000)
+pred_zt$name <- paste0(ifelse(pred_zt$country == 1, "Zambia", "South Africa"),
+                 #", ", ifelse(pred_zt$strata_tst == 0, "Low risk", "High risk"),
+                 ", ", ifelse(pred_zt$hh == 0, "No HH","HH"),
+                 ", ", ifelse(pred_zt$ecf == 0, "No ECF","ECF"))
+
+pred_mod <- predict(mod0, newdata = pred_zt, se.fit = T)
+
+pred_zt$prediction <- pred_mod[[1]]
+pred_zt$se <- pred_mod[[2]]
+
+# Prediction and SE are in log space
+pred_zt$lin_pred <- exp(pred_zt$prediction)
+pred_zt$lower <- exp(pred_zt$prediction - pred_zt$se * qnorm(0.975))
+pred_zt$upper <- exp(pred_zt$prediction + pred_zt$se * qnorm(0.975))
+
+# Let's convert to an incidence
+pred_zt <- data.table(pred_zt)
+pred_zt[, c("lin_pred","lower","upper") := 
+          lapply(.SD, function(x) x/n),
+        .SDcols = c("lin_pred","lower","upper")]
+
+
+zt <- merge(zt, pred_zt, by = c("country","hh","ecf"))
+
+ggplot(pred_zt, aes(x = name, y = lin_pred, ymin = lower, ymax = upper)) +
+  geom_point(size = 3) +
+  geom_errorbar(width = 0) +
+  coord_flip() +
+  geom_point(data = zt, aes(y = d/n.x, size = n.x), col = "purple", alpha = 0.4) +
+  guides(size = "none") +
+  theme_classic() + xlab("") + ylab("Incidence")
+
+mean_vals <- coef(mod0)
+varcov <- vcov(mod0)
+
+draws <- mvrnorm(1000, mean_vals, varcov)
+draws <- as.data.frame(draws)
+
+ggpairs(draws)
+
+# Simulate 1000 draws from the distribution
+draws <- mvrnorm(1000, mean_vals, varcov)
+
+# What is this object? It is 1000 rows and 8 cols
+dim(draws)
+
+# Each column is a coefficient from the model (named in object)
+# while each row is a conditional realization of the coefficient
+# (depends on itself and other variables in the model)
+coef(mod0)[1]
+mean(draws[,1])
+
+# What do we do with this? 
+# Let's say we want to know if the effect of the intervention is statistically significant in South Africa (country = 2) and in the high risk strata (strata = 1)
+# Create our values. Make sure they are ordered the same as the draws
+colnames(draws)
+my_counterfactual <- data.table(intercept = 1,
+                                country = c(1, 1),
+                                ecf = c(0, 0),
+                                hh = c(0, 1),
+                                country_strata = 1,
+                                ecf_hh = c(0, 0))
+my_counterfactual
+
+intervention <- data.table()
+control <- data.table()
+
+for(i in 1:1000){
+  control <- rbind(control,
+                   draws[i,] * my_counterfactual[1,])
+  intervention <- rbind(intervention,
+                        draws[i,] * my_counterfactual[2,])
+  
+}
+
+# Now we can sum up terms to get the predicted value by draw
+pred_control <- rowSums(control)
+pred_intervention <- rowSums(intervention)
+
+# Find the difference
+pred_difference <- pred_control - pred_intervention
+
+ggplot(rbind(data.table(v1 = pred_control)[, type := "No ECF"], 
+             data.table(v1 = pred_intervention)[, type := "ECF"]), aes(x = type, y = exp(v1))) + geom_boxplot()
+
+# Does the 95% CI cross 0?
+mean_diff <- mean(exp(pred_difference))
+lower_diff <- quantile(exp(pred_difference), 0.025)
+upper_diff <- quantile(exp(pred_difference), 0.975)
+res <- data.table(mean_diff, lower_diff, upper_diff)
+
+res
+```

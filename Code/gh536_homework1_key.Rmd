@@ -1,0 +1,280 @@
+---
+title: "GH 536 Homework 1 Answer Key"
+author: "Chris Troeger"
+date: "January, 2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(knitr)
+library(ggplot2)
+library(data.table)
+library(scales)
+library(reshape2)
+```
+
+# Note:
+There are many possible ways to correctly complete this assignment. This document is meant to show a single set of solutions and give you an example of code that can be used to answer the questions.
+
+I am using *data.table* for my data management and *ggplot2* for my plotting, but this is a personal preference.
+
+# Question 1:
+## Consider the data from the evaluation surveys (2004-2005).  You will notice that onchocerciasis prevalence is measured using two different diagnostics, with some communities only having one diagnostic reported.  
+
+```{r}
+os <-  "pc"
+
+if(os  == "mac"){
+  setwd("~/Documents/OneDrive - UW/PhD/GH Teaching Assistant/Data")
+} else {
+  setwd("C:/Users/ctroeger/OneDrive - UW/PhD/GH Teaching Assistant/Data/")
+}
+
+# Read in data
+baseline <- fread("baseline_eval.csv")
+mda <- fread("MDA_coverage.csv")
+vector <- fread("vector.csv")
+monitoring <- fread("monitoring_data.csv")
+
+n_villages <- nrow(baseline)
+n_admin2 <- length(unique(baseline$admin2))
+baseline_years <- range(baseline$year_baseline)
+eval_years <- range(baseline$year_eval)
+
+```
+
+## A) Present descriptive statistics of the study data
+
+Here are some examples of descriptive statistics for the data
+
+There are `r n_villages` villages in the data set. The data come from `r n_admin2` administrative level 2 districts in Burkina Faso. Baseline measurements of onchocerciasis took place between `r paste0(baseline_years[1], " and ", baseline_years[2])` and the followup evaluation measurements took place between `r paste0(eval_years[1], " and ", eval_years[2])`.
+
+```{r, warning = F, message = F}
+summary(baseline[, c("nodule_prev_base","nodule_eval_prev","ov16_eval_prev","nodule_eval_positive")])
+
+# A more customized version
+kable(data.table(method = c("Nodule baseline","Nodule evaluation","Rapid evaluation"),
+                 value = c(mean(baseline$nodule_prev_base, na.rm = T),
+                           mean(baseline$nodule_eval_prev, na.rm = T),
+                           mean(baseline$ov16_eval_prev, na.rm = T)),
+                 sd = c(sd(baseline$nodule_prev_base, na.rm = T),
+                        sd(baseline$nodule_eval_prev, na.rm = T),
+                        sd(baseline$ov16_eval_prev, na.rm = T)),
+                 count = c(nrow(baseline[!is.na(nodule_prev_base)]),
+                           nrow(baseline[!is.na(nodule_eval_prev)]),
+                           nrow(baseline[!is.na(ov16_eval_prev)]))),
+      digits = 2, col.names = c("Diagnostic","Mean prevalence","Standard deviation","Non-missing villages"))
+
+ggplot(baseline) + 
+  geom_histogram(aes(x = nodule_eval_prev, fill = "Nodule evaluation"), alpha = 0.5) +
+  geom_histogram(aes(x = nodule_prev_base, fill = "Nodule baseline"), alpha = 0.5) +
+  geom_histogram(aes(x = ov16_eval_prev, fill = "Oocyte (rapid)"), alpha = 0.5) +
+  theme_bw() + xlab("Prevalence")
+
+ggplot(baseline) + 
+  geom_density(aes(x = nodule_eval_prev, fill = "Nodule evaluation"), alpha = 0.3) +
+  geom_density(aes(x = nodule_prev_base, fill = "Nodule baseline"), alpha = 0.3) +
+  geom_density(aes(x = ov16_eval_prev, fill = "Oocyte (rapid)"), alpha = 0.3) +
+  theme_bw() + xlab("Prevalence")
+```
+
+\pagebreak
+## B) Scatter nodule prevalence against ov16 prevalence
+
+```{r, warning = F, fig.height= 4, fig.width = 5, fig.align = "center"}
+ggplot(baseline, aes(x = ov16_eval_prev, y = nodule_eval_prev)) + geom_point(size = 3, alpha = 0.2) +
+  geom_abline(intercept = 0, slope = 1) + theme_bw(base_size = 10) +
+  scale_x_continuous("Oocyte prevalence", labels = percent) + 
+  scale_y_continuous("Skin nodule prevalence", labels = percent) + 
+  ggtitle("Prevalence of Onchoderiasis in Evaluation Surveys")
+```
+
+## C) Do you notice missing or implausible data in the baseline_eval file?
+
+```{r}
+total_areas <- nrow(baseline)
+nodule_areas <- nrow(baseline[!is.na(nodule_eval_prev)])
+rapid_areas <- nrow(baseline[!is.na(ov16_eval_prev)])
+missing_areas <- nrow(baseline[is.na(nodule_eval_prev) & is.na(ov16_eval_prev)])
+```
+
+Yes, although there are `r total_areas` total study areas, `r nodule_areas` have nodule prevalence values and `r rapid_areas` have ov16 rapid diagnostic prevalence values. `r missing_areas` study areas have neither estimate!
+
+There is also a value of -1 for *nodule_eval_positive*. How could there be a value of -1 positive tests? Shouldn't that be a positive integer?
+
+\pagebreak
+# Question 2:
+## Merge the vector control, MDA, and baseline evaluation datasets together.
+
+## A) What variables do you think should be used to merge these data?  
+
+ *villageid* should be used to merge the vector control and evaluation datasets. These datasets each have 541 rows of data, corresponding to each village. *admin2id* doesn't uniquely identify the rows. However, MDA is only unique by *admin2id*, so merging on that variable makes sense for that merge.
+
+Since both vector control and evaluation datasets have admin2id and admin2 also, merge on all three variables so as to not create duplicates in my final dataset. I don't want latitude and longitude duplicated so I am not including them in my second object in the merge.
+
+## B) Merge vector control with evaluation data
+
+
+```{r}
+dt <- merge(baseline, vector[, -c("longitude","latitude")], 
+            by = c("admin2","admin2id","village_id"))
+
+```
+
+### Common problem: not merging by unique identifiers
+
+```{r}
+## Many to many merge with non-unique identifier
+dt_merged <- merge(baseline, vector, by = "admin2id", allow.cartesian = T)
+nrow(dt_merged[village_id.x == 521]) 
+nrow(dt[village_id == 521])
+
+# Merging by admin2id here duplicates each village by the number of villages in that admin2id
+nrow(dt_merged[village_id.x == 521])
+nrow(dt[admin2id == dt[village_id == 521]$admin2id])
+```
+
+## C) Merge with MDA data
+
+When merging with MDA, some *admin2* locations don't have values so I merge all.x = T to keep all observations.
+
+```{r}
+dt <- merge(dt, mda, by.x = "admin2id", by.y = "ADMIN2ID", all.x = T)
+```
+
+\pagebreak
+## D) Merge with the community monitoring data by village ID. Create a line plot for each community.
+
+```{r, warning = F, fig.align = "center", fig.height = 4.2, fig.width = 6}
+monitoring <- monitoring[, -c("longitude","latitude")]
+dt <- merge(dt, monitoring, by = c("admin2","admin2id","village_id"), all.x=T)
+
+## Make long for plot:
+# Use melt()
+# lots of missing monitoring prevalences
+long <- dt[!is.na(skin_prev_monitor),]
+long <- melt(long[, c("village_id","admin2id",
+                    "nodule_prev_base", "skin_prev_monitor", "nodule_eval_prev", 
+                    "year_baseline","year_eval","year",
+                    "vector_01")],
+             id.vars = c("village_id", "vector_01","admin2id",
+                         "year_baseline","year_eval","year"))
+
+long$plot_year <- ifelse(long$variable == "nodule_prev_base", long$year_baseline,
+                         ifelse(long$variable == "nodule_eval_prev", long$year_eval, long$year))
+
+ggplot(long, aes(x = plot_year, y = value, col = factor(vector_01), group = village_id)) + 
+  geom_line(alpha = 0.6) + theme_bw() + scale_x_continuous("Year", breaks = 1995:2005) + 
+  scale_y_continuous("Prevalence", label = percent) + 
+  theme(legend.position = "bottom") + 
+  scale_color_manual("Vector\ncontrol", labels = c("Yes","No"), values = c("goldenrod","purple")) +
+  ggtitle("Onchoceriasis prevalence by village in Burkina Faso")
+
+```
+
+### Common error: Not subsetting to only villages with a monitoring prevalence 
+
+```{r, warning = F, message = F}
+# Note that this doesn't have the subset anymore!
+long <- melt(dt[, c("village_id","admin2id",
+                    "nodule_prev_base", "skin_prev_monitor", "nodule_eval_prev", 
+                    "year_baseline","year_eval","year",
+                    "vector_01")],
+             id.vars = c("village_id", "vector_01","admin2id",
+                         "year_baseline","year_eval","year"))
+
+long$plot_year <- ifelse(long$variable == "nodule_prev_base", long$year_baseline,
+                         ifelse(long$variable == "nodule_eval_prev", long$year_eval, long$year))
+
+ggplot(long, aes(x = plot_year, y = value, col = factor(vector_01), group = village_id)) + 
+  geom_line(alpha = 0.6) + theme_bw() + scale_x_continuous("Year", breaks = 1995:2005) + 
+  scale_y_continuous("Prevalence", label = percent) + 
+  theme(legend.position = "bottom") + 
+  scale_color_manual("Vector\ncontrol", labels = c("Yes","No"), values = c("goldenrod","purple")) +
+  ggtitle("Onchoceriasis prevalence by village in Burkina Faso")
+
+```
+
+\pagebreak
+# Question 3: Create a simple linear model of the interventions.
+
+## A) Create an outcome variable that is the difference in prevalence from baseline to evaluation. Use difference in nodule prevalence if reported at both time points or substitute ov16_prev if missing nodule at evaluation.
+
+```{r}
+# replace missing end values with ov16
+
+  dt$end_prev <- ifelse(!is.na(dt$nodule_eval_prev), dt$nodule_eval_prev, dt$ov16_eval_prev)
+
+  dt$prev_diff <- dt$end_prev - dt$nodule_prev_base
+```  
+
+## B) Create a variable for MDA that is rounds of MDA implemented
+
+```{r}  
+  mda_cols <- paste0("COV_", c("99", "00", "01", "02", "03"))
+
+# Sum columns where !is.na(COV_X) using base R
+  dt$mda_rounds <- rowSums(!is.na(dt[, c("COV_99","COV_00","COV_01","COV_02","COV_03")]))
+
+# Alternate using data.table()
+  head(dt[, ..mda_cols])
+  
+  dt[, paste0("dt_", as.vector(mda_cols)) := lapply(.SD, function(x) ifelse(!is.na(x), 1, 0)), 
+     .SDcols = mda_cols]
+
+# Check that worked...
+  head(dt[, (ncol(dt)-4):ncol(dt)])
+# Can then just sum them
+  dt[, mda_rounds := dt_COV_99 + dt_COV_00 + dt_COV_01 + dt_COV_02 + dt_COV_03]
+```
+
+## C) Recode vector control
+
+```{r}
+  dt[, vector_control := ifelse(vector_01 == 2, 0, 1)]
+
+```
+
+\pagebreak
+## D) Run a **linear** model using glm()
+
+```{r}
+my_mod <- glm(prev_diff ~ mda_rounds + vector_control, data = dt)
+summary(my_mod)
+
+```
+
+**There is a problem here: the range in the difference in prevalence between evaluation and baseline is not $-\infty$ to $\infty$. In practice, it has a range of -1 to 1. How could we transform our outcome to avoid this problem?**
+
+```{r, warning = F, message = F}
+pred <- data.table(mda_rounds = rep(0:5,2),
+                   vector_control = rep(c(0,1), each = 6))
+pred$prediction <- predict(my_mod, newdata = pred)
+
+ggplot(dt, aes(x = mda_rounds, y = prev_diff, col = factor(vector_control))) +
+  geom_point(size = 3, alpha = 0.4) + theme_bw() +
+  geom_line(data = pred, aes(y = prediction)) + 
+  xlab("Rounds of MDA") +
+  ylab("Difference in evaluation and baseline prevalence") +
+  scale_color_manual("Vector control", values = c("goldenrod","purple"))
+
+```
+
+## E) Which intervetion had a stronger impact?
+
+Alone, vector control in 2001 had a larger impact on the prevalence of onchocerciasis in these communities (point estimate larger magnitude). However, most communities had more than 2 rounds of MDA. In fact, `r round(nrow(dt[mda_rounds > 3]) / nrow(dt)*100, 1)`% of villages had 4 or 5 rounds of MDA. For each round of MDA, the model predicts a 9% decrease in onchocerciasis prevalence. At 4 or 5 rounds, that would be a decrease of ~40%!
+
+\pagebreak
+# Question 4
+## List three sources of bias that may exist in the data and explain how you would attempt to account for them.
+
+* One source of bias is missing data. As described in *Question 1C*, there were 115 communities that missing prevalence data that prevented them from being considered in the regression. If missingness was correlated with the predictors (vector control or MDA) or with the outcome (prevalence), this could introduce a bias. Missing data on the outcome are often difficult to account for. One approach could be performing a survival-analysis or something similar that accounts for censoring (drop out) of longitudinal data. Another approach could be using some kind of multiple imputation, which, in my understanding, can actually be used for the outcome variable.
+
+* There are multiple levels at which the data describe. The baseline evaluation dataset has 541 villages with prevalence values but the MDA and monitoring datasets have just a subset of those and in the case of MDA, represent an action (mass drug administration) over an entire admin2 unit, not only to the villages of the study. You could control for this using a multilevel model or by considering admin2 directly in a regression model in a different way, perhaps as a factor.
+
+* We were instructed to transform the MDA coverage variables from continuous to binary. We lose information when we do this. It is possible that there is a critical threshold of MDA that is important (70% for example), not the binary presence or absence of the intervention. We could account for this by using the continuous variables in the regression, not the sum of any MDA. 
+
+* The villages are not tracked over the same periods of time. There could have been years with higher transmission of onchoceriasis in this community than others or there could be biases in the duration of observation (for example, a location with more years of observation has more opportunities for the sum of MDA campaigns, a covariate in our model). We might want to account for duration of observation in some way in this model, perhaps as an interaction term with MDA years. 
+* There are multiple different types of diagnostic tools used to measure disease prevalence. This could bias our results as shown in Question 1. A coefficient of diagnostic test could be added to the model. 
+
+* Others?

@@ -1,0 +1,326 @@
+---
+title: 'Lab: GLMMs'
+author: "Chris Troeger"
+date: "2/9/2022"
+output: html_document
+---
+
+```{r, echo = F}
+set.seed(101)
+library(knitr)
+library(ggplot2)
+library(data.table)
+library(scales)
+library(boot) # has inv.logit() function
+library(lme4)
+library(MASS)
+```
+
+### Grab Ghana Bednet data
+
+```{r, echo = F}
+# Setting personal working directory
+os <-  "pc"
+
+if(os  == "mac"){
+  setwd("~/Documents/OneDrive - UW/PhD/GH Teaching Assistant/Data")
+} else {
+  setwd("C:/Users/ctroeger/OneDrive - UW/PhD/GH Teaching Assistant/Data/")
+}
+
+# Read in data
+dt <- fread("gha_bednet.csv")
+#dt <- fread("Nutrimal_supp.csv")
+#pneumo <- fread("pneumovac.csv")
+
+head(dt)
+
+```
+
+### Note: 
+
+In this lab, I am going to be using $outcome$ as the response (Y) variable in the example regressions. Given that this variable represents binary died/survived result from this study, I will often refer to the coefficients in the model as a *probability*. Be mindful of what the coefficients mean, depending on the model family you choose!
+
+To start out in this demonstration, let's think more about what the coefficients in a binomial model mean. I am going to start with a very simple model without any covariates.
+
+```{r}
+mod0 <- glm(outcome ~ 1, data = dt, family = "binomial")
+summary(mod0)
+```
+
+What is the interpretation of the intercept? I believe that it is the logit-mean of the probability of death in this study. Let's check that.
+
+```{r}
+inv.logit(coef(mod0))
+mean(dt$outcome)
+```
+
+It sure is! We have used a maximum likelihood estimator in $glm$ to count up the number of deaths and divide that by the number of children. Fancy!
+
+### Fixed-effects model
+
+Let's say that we think the probability of death varies by cluster and we want to account for that. One way we could do this is by using a **fixed effects only model**. This model will treat each cluster as its own intercept. That is, what is the expected probability of death when $cluster = cluster_c$? 
+
+$$
+P(Death_i | Cluster_i) = Y_i \sim \beta_0 + \beta_1Cluster_1 + \beta_2Cluster_2 ... \beta_pCluster_p
+$$
+
+Why did I write the equation that way? Because I (will) specify cluster as a factor in the regression equation. When you do that, R creates a new binary variable for each level (possible value) of the factor. It changes this:
+
+```{r, echo = F}
+data.table(child = 1:5, cluster = c(1, 1, 2, 3, 4))
+```
+
+to this:
+
+```{r, echo = F}
+data.table(child = 1:5,  cluster = c(1, 1, 2, 3, 4),
+           cluster1 = c(1,1,0,0,0),
+           cluster2 = c(0,0,1,0,0),
+           cluster3 = c(0,0,0,1,0),
+           cluster4 = c(0,0,0,0,1))
+```
+
+Be mindful to not include a cluster variable in a regression as a continuous variable. For example, in these data we have $cluster_1 ... cluster_96$. Why wouldn't we (probably) ever want to simply include it as `glm(outcome ~ cluster, data = dt, family = binomial)`? 
+
+What happens when we run this model?
+
+```{r}
+mod1 <- glm(outcome ~ factor(cluster), data = dt, family = binomial)
+summary(mod1)
+```
+
+Wait, what was that model? How do we interpret it? 
+
+The fixed effects for each cluster represent the difference from the probability of death between that cluster and cluster 1. **Note:** the statistical significance indicates if the probability of death in $cluster_c$ is significantly different from $cluster_1$. Usually we don't care about that but perhaps we do. 
+
+We have created a model with nclusters + 1 parameters. Why is it +1?
+
+* *Intercept* (the first cluster is absorbed into the intercept in this way of coding a factor)
+* *(Clusters - 1)* $\beta s$
+* The error term ($\epsilon$)
+
+Why would we want to run a model this way? In other contexts (as in, not cluster randomized trials), perhaps we have grouped data that we expect to be different from each other. 
+
+We have used maximum likelihood to estimate the probability of death in each cluster. We can check that. Remember that the coefficients for each cluster are *relative* to the first cluster, so we need to add the intercept
+
+```{r}
+# Find mean by each cluster and logit transform
+sdt <- dt[, lapply(.SD, function(x) logit(mean(x))),
+          .SDcols = "outcome",
+          by = "cluster"][, mean := outcome]
+
+# Find overall mean
+sdt$individual_mean <- logit(mean(dt$outcome))
+
+sdt$outcome[1:5]
+
+fixed_outcome <- as.numeric(c(coef(mod1)[1], coef(mod1)[2:length(coef(mod1))] + coef(mod1)[1]))
+fixed_outcome[1:5]
+```
+
+Excellent! We have now used MLE to calculate the mean probability of death for each cluster (also with uncertainty). We don't need to do that every time. Let's use the predict function to save ourselves the annoyance of manually calculating it. 
+
+```{r}
+## Using predict
+sdt$pred_fixed <- predict(mod1, newdata = sdt)
+
+# Find cluster means
+sdt$fixed_mean <- mean(sdt$pred_fixed)
+
+```
+
+There is no constraint to the estimates. The model is simply finding the probability of death in each cluster. Let's look at the distribution:
+
+```{r, echo = F}
+ggplot(data.table(coefficient = coef(mod1)), aes(x = coefficient)) + geom_histogram(binwidth = 0.5, fill = "gray", col = "black") +
+  theme_classic() + geom_vline(xintercept = 0, lty = 2) +
+  xlab("Coefficients")
+```
+
+Most clusters are pretty similar, actually. However, there is one cluster where the risk of mortality is *extremely* low. Actually, the model has fit an estimate even though there were no deaths in that cluster (cluster 11). Recall that trying to take a logit() of a number <=0 or >= 1 is not defined:
+
+```{r}
+logit(0)
+logit(1)
+logit(2)
+```
+
+and so the logit of 0 is -Inf. This is an interesting difference between simply taking the logit means and modeling them. Look how large the standard error of the estimate for cluster 11 is! 
+
+### Random intercepts model
+
+An alternative assumption is that the clusters are actually observations from a normal distribution. A random effects model implements this assumption. There is an overall mean probability of the outcome (death) and each cluster varies from that probability by some amount from a distribution with mean ($\mu_\alpha$) 0 and an estimated standard deviation ($\sigma^2_\alpha$). 
+
+
+```{r}
+mod2 <- glmer(outcome ~ (1 | cluster), data = dt, family = binomial)
+summary(mod2)
+
+```
+
+Okay, so what is the deal with *that* model? How do we interpret it?
+
+This model has a single intercept value. The overall intercept in the model (the grand mean) is a weighted average of the means for each cluster. Clusters with smaller variance in the outcome are weighted more strongly. 
+
+There are big differences between this model and the model with fixed effects for each cluster. The intercept of the random intercept model is the weighted mean probability of the outcome and that differs from the unweighted mean. Recall that the fixed effects intercept is actually the probability of the outcome in the first cluster. 
+
+```{r}
+fixef(mod2)[1]
+logit(mean(dt$outcome))
+```
+
+For class, understanding how the random effects are estimated is not that important. However, it is worth emphasizing that random effects models estimate within cluster variance and between cluster variance:
+
+* Within cluster variance is how much the outcome differs for each observation within a cluster. You will often see this written as $\sigma^2_\alpha$. 
+* Between cluster variance is how much the mean outcome for each cluster varies across all clusters. You will often see this written as $\sigma^2_y$. 
+
+The weighted mean $\mu_\alpha$ is the overall intercept in the model.
+
+#### Aside: Extracting information from a `merMod` object:
+
+```{r, warning = F, message = F}
+mod_mixed <- mod2
+# uncomment this line for a more interesting model
+# mod_mixed <- glmer(outcome ~ bednet + (agegp | cluster), data = dt, family = binomial)
+
+# ranef() will extract the random effects
+re <- ranef(mod_mixed)
+head(re)
+# The first vector is the grouping variable (cluster in this case)
+head(re$cluster)
+# The second vector is the intercept or slope (Intercept in this case)
+head(re$cluster$`(Intercept)`)
+# Put it all together to get just the values
+random_effects <- as.vector(ranef(mod_mixed)$cluster$`(Intercept)`)
+
+# fixef() will extract the fixed effects
+fixef(mod_mixed)
+
+# VarCorr() gives estimated variance, standard deviation, correlations of random-effects
+ranvar <- as.data.table(VarCorr(mod_mixed))
+
+# the "arm" package has a nice function to extract standard errors for random effects
+library(arm)
+re_se <- se.ranef(mod_mixed)
+head(re_se)
+
+```
+
+The random effects in this model are the difference between the overall intercept and the estimated value of the mean outcome for each cluster. 
+
+Instead of estimating $Clusters + 1$ parameters, this model only estimates three:  
+
+* The overall (weighted) mean ($\mu_{\alpha}$)
+* The between cluster standard deviation (how much do clusters vary? $\sigma^2_{\alpha}$)
+* The within cluster standard deviation (how much do individual within clusters vary? $\sigma^2_y$)
+
+
+```{r, echo = F}
+ggplot(data.table(random_effects = random_effects), aes(x = random_effects)) + geom_histogram(binwidth = 0.1, fill = "gray", col = "black") +
+  theme_classic() + geom_vline(xintercept = 0, lty = 2)
+```
+
+```{r}
+sdt$pred_random <- predict(mod2, newdata = sdt)
+
+# Random effects mean (weighted mean)
+mean(sdt$pred_random)
+
+t.test(sdt$pred_fixed, sdt$pred_random)
+
+# ggplot(sdt, aes(x = pred_fixed, y = pred_random)) +
+#   geom_point() + geom_abline(intercept = 0, slope = 1) +
+#   theme_classic()
+
+ggplot(sdt, aes(x = pred_fixed)) +
+  geom_histogram(aes(fill = "Fixed"), alpha = 0.5, binwidth = 0.1) +
+  geom_histogram(aes(x = pred_random, fill = "Random"), alpha = 0.5, binwidth = 0.1) +
+  theme_classic() 
+```
+
+This phenomenon is known as *shrinkage*. There is less variation in the predicted values of outcome by cluster. What does this mean?
+
+The inverse logit of the predicted values represents the probability of mortality in each cluster.The fixed effects model allows the predictions free rein to match the data while the random intercepts model enforces assumptions about the underlying distribution of the probability of mortality (the intercept) and the variation in the probability between clusters (the standard deviation of the random effect). 
+
+```{r}
+ggplot(sdt, aes(x = inv.logit(pred_fixed), y = inv.logit(pred_random))) +
+  geom_point() + geom_abline(intercept = 0, slope = 1) +
+  theme_classic() + coord_fixed() + 
+  xlab("Fixed estimate\n(observed probability)") +
+  ylab("Random estimate\n(normal distribution around weighted average)")
+```
+
+### More interesting example
+
+The purpose of that part of this lab is to try to provide more intuition about what random effects are and how they differ from fixed effects. Further, it is meant to give more examples of managing data and regression objects. 
+
+From here down, we will look at how the choice of the model structure could affect your intervention coefficient. We will look at how the coefficient on bednet use (the intervention) changes in each of these models.
+
+```{r}
+mod3 <- glm(outcome ~ bednet, data = dt, family = "binomial")
+mod4 <- glm(outcome ~ bednet + factor(cluster), data = dt, family = "binomial")
+mod5 <- glmer(outcome ~ bednet + (1 | cluster), data = dt, family = "binomial")
+```
+
+How are these models different?
+
+Let's say that our primary interest is the coefficient on `bednet`. How does it vary?
+
+```{r}
+make_uncertainty <- function(model, type = "lm"){
+  if(type != "lm"){
+    beta <- fixef(model)[2]
+  } else {
+    beta <- coef(model)[2]
+  }
+  # I prefer extracting from the variance-covariance matrix
+  mod_se <- sqrt(diag(vcov(model)))[2]
+  
+  # So, how do we get our confidence intervals? 
+  # We must first add to our beta and THEN exponentiate
+  lwr <- exp(beta - mod_se * qnorm(0.975))
+  upr <- exp(beta + mod_se * qnorm(0.975))
+  
+  out <- data.table(beta = exp(beta), lwr, upr)
+  return(out)
+}
+
+make_uncertainty(mod3)
+
+odds_table <- rbind(make_uncertainty(mod3)[, model := "linear"],
+                    make_uncertainty(mod4)[, model := "factor"],
+                    make_uncertainty(mod5, type = "mixed")[, model := "mixed"])
+
+odds_table
+
+ggplot(odds_table, aes(x = model, y = beta, ymin = lwr, ymax = upr, col = model)) +
+  geom_point(size = 3) + geom_errorbar(width = 0, lwd = 1.25) + theme_classic() +
+  xlab("") + ylab("Odds ratio") + geom_hline(yintercept = 1, lty = 2, alpha = 0.5) +
+  guides(col = "none")
+```
+
+
+```{r, echo = F, eval = F}
+
+# The models with bednet and cluster are conceptually similar. However, something very strange has happened with the model where cluster is included as a factor. Ideas as to why?
+# 
+# It has to do with cluster 11 (with 0 deaths). This is a problem because being in cluster 11 *perfectly* predicts if a child will die or not. In real life, this is not a plausible scenario. Random intercepts models do not have the same problem (why?). 
+# 
+# For the purpose of this lab, let's run one more fixed effects model skipping that cluster. 
+
+mod6 <- glm(outcome ~ bednet + factor(cluster), data = dt[!(cluster %in% c(11, 95))], family = "binomial")
+odds_table <- rbind(odds_table,
+                    make_uncertainty(mod6)[, model := "fixed (dropped c11)"])
+
+ggplot(odds_table, aes(x = model, y = beta, ymin = lwr, ymax = upr, col = model)) +
+  geom_point(size = 3) + geom_errorbar(width = 0, lwd = 1.25) + theme_classic() +
+  xlab("") + ylab("Odds ratio") + geom_hline(yintercept = 1, lty = 2, alpha = 0.5) +
+  guides(col = "none")
+
+```
+
+
+
+
+# End for this week!!

@@ -1,0 +1,357 @@
+---
+title: "Lab 2: non-linear models"
+author: "Chris Troeger"
+date: "January 20, 2022"
+output: html_document
+---
+
+```{r, echo = F, warning = F, message = F}
+set.seed(101)
+library(knitr)
+library(ggplot2)
+library(data.table)
+library(scales)
+library(boot) # has inv.logit() function
+library(lme4)
+library(MASS)
+```
+
+# Generalized (non) linear models in R
+
+### Create data from homework 1
+
+```{r, echo = F}
+# Setting personal working directory
+os <-  "pc"
+
+if(os  == "mac"){
+  setwd("~/Documents/OneDrive - UW/PhD/GH Teaching Assistant/Data")
+} else {
+  setwd("C:/Users/ctroeger/OneDrive - UW/PhD/GH Teaching Assistant/Data/")
+}
+
+# Read in data
+baseline <- fread("baseline_eval.csv")
+mda <- fread("MDA_coverage.csv")
+vector <- fread("vector.csv")
+monitoring <- fread("monitoring_data.csv")
+
+# Merge
+dt <- merge(baseline, vector[, -c("longitude","latitude")],
+            by = c("admin2","admin2id","village_id"))
+
+dt <- merge(dt, mda, by.x = "admin2id",
+            by.y = "ADMIN2ID", all.x = T)
+
+dt <- merge(dt, monitoring[, -c("longitude","latitude")],
+            by = c("admin2","admin2id","village_id"), all.x=T)
+
+# Sum columns where !is.na(COV_X) using base R
+dt$mda_rounds <- rowSums(!is.na(dt[, c("COV_99","COV_00","COV_01","COV_02","COV_03")]))
+dt$vector_01 <- ifelse(dt$vector_01 == 2, 0, 1)
+
+# Save it
+write.csv(dt, "~hmwk1_merged_data.csv", row.names = F)
+
+dt <- fread("~hmwk1_merged_data.csv")
+head(dt)
+
+
+```
+
+## Let's think about how we would model different variables from this dataset. 
+A big part of the choice rests on the properties of the response (Y) variable. A linear model assumes that the response can be values $-\infty$ to $\infty$. 
+
+For this class, we are going to focus on two types of non-linear responses:
+
+**Binary (must be $0 <= y <= 1$)**  
+
+  * Individual level: binary (0/1)  
+  * Population level: prevalence/proportion (values 0-1)  
+  
+**Count (must be $0 <= y$ to $\infty$)**  
+
+  * Individual level: events (non-negative integers)  
+  * Population level: rates (non-negative)  
+  
+Both of these has a "family" in the $glm()$ function in R. 
+
+Understanding the family to use for a regression is important to make sure our modeled estimates follow the assumption that the response can be $-\infty$ to $\infty$. 
+
+Let's think about the the data in homework 1. I have already prepped these data (see the code in the .Rmd file). I am going to do some pretty forced regressions as examples. 
+
+### Binary: vector control
+
+For the first example, let's say we wanted to predict which villages received vector control on the basis of nodule prevalence at baseline.
+
+```{r, warning = F, message = F, echo = F}
+ggplot(dt, aes(x = nodule_eval_prev, y = vector_01)) + geom_point() + theme_classic()
+```
+
+Fitting a linear model to these data would be bad. That's because vector_01 can't take any values except 0 or 1. A linear model will  
+
+* be biased  
+* have massive heteroskedasticity  
+* produce impossible predictions  
+* be an incorrect functional form  
+
+Let's fit two models. First a linear model, second we will fit a logistic model. Binomial (logistic) models are appropriate for count data.
+
+```{r}
+mod1 <- glm(vector_01 ~ nodule_eval_prev, data = dt)
+mod2 <- glm(vector_01 ~ nodule_eval_prev, data = dt, family = "binomial")
+
+# summary(mod1)
+# summary(mod2)
+```
+
+Recall that the coefficients from a binomial regression is not in linear space. With the help of some algebra, the coefficients represent the log(odds) of the outcome given a one unit change in the predictor. 
+
+```{r}
+print(paste0("The odds that vector control is 1 when nodule prevalence at baseline is 1 is ", round(exp(coef(mod2)[2]), 6), " (compared to when prevalence is 0)."))
+```
+
+Now for predictions. Note that we need to find the inverse logit of the predictions from the second model. That's because the predictions will be in logit space. 
+
+```{r, warning = F, message = F}
+dt$pred_mod1 <- predict(mod1, newdata = dt)
+dt$pred_mod2 <- inv.logit(predict(mod2, newdata = dt)) # note inverse logit
+
+ggplot(dt, aes(x = nodule_eval_prev, y = vector_01)) + geom_point() + theme_classic() +
+  geom_line(aes(y = pred_mod1, col = "Linear")) +
+  geom_line(aes(y = pred_mod2, col = "Binomial"))
+```
+
+### Population summary binomial: oocyte prevalence at evaluation  
+
+Binomial models can also be used for modeling prevalence (population) outcomes. That is because the model interprets values bound between 0 and 1 as the number of successes ($k$) among $n$ Bernoulli trials (think of counting heads from total coin flips). 
+
+```{r, warning = F, message = F}
+ggplot(dt) + 
+  geom_density(aes(x = nodule_eval_prev, fill = "Nodule evaluation"), alpha = 0.3) +
+  geom_density(aes(x = nodule_prev_base, fill = "Nodule baseline"), alpha = 0.3) +
+  geom_density(aes(x = ov16_eval_prev, fill = "Oocyte (rapid)"), alpha = 0.3) +
+  theme_bw() + xlab("Prevalence")
+```
+
+The prevalence of onchocerciasis must be $0 <= P_o <= 1$. We can use a binomial model. 
+
+```{r}
+# Let's create a linear and binomial model of final prevalence
+ep_lmod <- glm(ov16_eval_prev ~ vector_01 + mda_rounds, data = dt)
+ep_bmod <- glm(ov16_eval_prev ~ vector_01 + mda_rounds, data = dt, family = "binomial")
+
+```
+
+What was that? Was it important? Kind of. 
+
+```{r, warning = F, message = F}
+ep_bmod2 <- glm(ov16_eval_prev ~ vector_01 + mda_rounds, data = dt, family = binomial(link = "log"))
+summary(ep_lmod)
+summary(ep_bmod)
+AIC(ep_lmod, ep_bmod)
+```
+
+We need to shift our thinking of binomial models just a little bit (or at least I did). In a binomial model, we are modeling the **probability** of an outcome. In other words, we are modeling the probability that the response $y_i$ is 1 given the model:
+
+$$
+P(y_i = 1 | model)
+$$
+In a model of binary outcomes, we only observe 0 or 1, but in a model of prevalence or proportions, we see values between 0 and 1. Our interpretation of the coefficients remains the same: the change in log odds that the probability of an event is 100% (or all events in a sample are 1). 
+
+```{r, warning = F, message = F}
+dt$pred_ep_l <- predict(ep_lmod, newdata = dt)
+dt$pred_ep_b <- inv.logit(predict(ep_bmod, newdata = dt))
+dt$pred_ep_b2 <- inv.logit(predict(ep_bmod, newdata = dt))
+
+# Make a dot plot to save ourselves some time
+ggplot(dt, aes(x = mda_rounds, y = ov16_eval_prev, col = factor(vector_01))) +
+  geom_point() + xlab("MDA rounds (n)") + ylab("Ooctye evaluation prevalence") + 
+  theme_classic() + scale_color_discrete("Vector control", labels = c("No","Yes")) +
+  geom_line(data = dt, aes(y = pred_ep_l, lty = "Linear")) +
+  geom_line(data = dt, aes(y = pred_ep_b, lty = "Binomial")) +
+  geom_line(data = dt, aes(y = pred_ep_b2, lty = "Binomial-log"))
+
+```
+
+### Count model: positive ooctye counts
+
+For the example, let's pretend that we had passive surveillance for onchocerciasis. People in each village that attended a health facility with symptoms were tested and the variable $ov16evalpositive$ represents the number of new cases in each village. Let's also pretend that we know the population in each village (but I am doing that with a random generation).
+
+```{r, warning = F, message = F}
+populations <- floor(rnorm(541, mean = 500, sd = 100))
+# would be wildly unlikely, but let's make sure that no values are less than 0
+range(populations)
+# cool
+
+dt$population <- populations
+dt$oo_rate <- dt$ov16_eval_positive / dt$population
+
+ggplot(dt, aes(x = ov16_eval_positive)) + 
+  geom_histogram(col = "black", fill = "lavender") + 
+  theme_classic()
+
+```
+
+This distribution looks like a Poisson distribution. 
+
+```{r}
+hist(rpois(1000, 5))
+```
+
+
+In fact, we will use the Poisson distribution for modeling rates and counts. 
+
+Recall that a Poisson distribution assumes mean and variance are the same. Is that true for our data?
+
+```{r}
+mean(dt$ov16_eval_positive, na.rm = T)
+sd(dt$ov16_eval_positive, na.rm = T)^2
+```
+
+Nope! Unfortunately our data are **overdispersed**. We will fit a negative binomial model to our data later, too, so that we can compare. 
+
+For modeling counts, we have options to specify the model. Given we know the population, we can add that as an offset (locations with larger populations are likely to have more counts). 
+
+```{r}
+# these are the same
+mod_pois <- glm(ov16_eval_positive ~ offset(log(population)) + mda_rounds, data = dt, family = "poisson")
+#mod_pois2 <- glm(ov16_eval_positive ~ mda_rounds, offset = log(population), data = dt, family = "poisson")
+
+summary(mod_pois)
+```
+
+Note that in both, we are using the count outcome as the left side of the equation and need to tell R that there should be an offset. An offset is not an estimated parameter in the model. Why is it log(population)?
+
+$$
+log(\frac{ov16evalpositive}{population}) = log(ov16evalpositive) - log(population)
+$$
+
+So we can simply add $log(population)$ to both sides:
+
+$$
+log(ov16evalpositive_i) \sim log(population_i) + \beta_0 ... 
+$$
+
+It might be tempting to log transform the rate or count and then run an ordinary linear model. While there are plenty of circumstances that log-linear models might be appropriate for the outcome, in this class the better choice is probably a Poisson or negative binomial model. Let's think about a few differences.
+
+* A Poisson model assumes the outcome consists of non-negative integers ($0 <= y_i$ where $y_i = {0,1,2,3,4...}$)
+* In contrast, a log-linear model log transforms the outcomes directly. The outcomes can be any *positive* value. Log-transformation of 0 will return -Inf because it is not a real number. 
+* A Poisson model makes specific assumptions about the variance (recall that in a Poisson mean = variance). In contrast, a log-normal model will assume the variance is normally distributed in log space.
+
+```{r, echo = F}
+# 1000 random obs, mean & variance = 5
+sims <- 10000
+smean <- 5
+
+sim_pois <- rpois(sims, smean) 
+sim_linear <- rnorm(sims, mean = smean, sd = sqrt(smean))
+sim_loglin <- exp(rnorm(sims, mean = log(smean), sd = sd(log(sim_linear), na.rm = T)))
+
+example <- data.table(type = c(rep("Poisson", sims),
+                               rep("Linear", sims),
+                               rep("Log-linear", sims)),
+                      value = c(sim_pois, sim_linear, sim_loglin))
+
+ggplot(example, aes(x = value, group = type)) + 
+  #geom_density(lwd = 1.2, aes(col = type)) + 
+  geom_histogram(data = example[type == "Poisson"], aes(fill= type), alpha = 0.5, binwidth = 1) +
+  geom_histogram(data = example[type == "Log-linear"], aes(fill= type), alpha = 0.5, binwidth = 1) +
+  theme_classic() + xlab("x") + 
+  theme(legend.position = "bottom") + 
+  geom_vline(xintercept = 0, lty = 2)
+
+ggplot(example, aes(x = log(value), group = type)) + 
+  #geom_density(lwd = 1.2, aes(col = type)) + 
+  geom_histogram(data = example[type == "Poisson"], aes(fill= type), alpha = 0.5) +
+  geom_histogram(data = example[type == "Log-linear"], aes(fill= type), alpha = 0.5) +
+  theme_classic() + xlab("log(x)") + 
+  theme(legend.position = "bottom") + 
+  geom_vline(xintercept = 0, lty = 2)
+```
+
+
+Our data are overdispersed. We will fit a negative binomial model, too. In addition, I am going to fit a log-linear model, a linear rate model, and a linear count model so we can compare them all.
+
+```{r}
+# Negative binomial (from MASS package)
+mod_negbin <- glm.nb(ov16_eval_positive ~ offset(log(population)) + mda_rounds, data = dt)
+summary(mod_negbin)
+
+mod_lograte <- glm(log(oo_rate) ~ mda_rounds, data = dt)
+summary(mod_lograte)
+
+# For good measure, make a linear model too
+mod_linrate <- glm(oo_rate ~ mda_rounds, data = dt)
+mod_lincount <- glm(ov16_eval_positive ~ mda_rounds, data = dt)
+```
+
+```{r, warning = F, message = F, echo = F}
+## For our plot to work as expected, let's make a 
+## dummy village with the mean population (500)
+pred_dt <- data.table(population = 500,
+                      mda_rounds = 0:20)
+pred_dt$pred_pois <- exp(predict(mod_pois, newdata = pred_dt)) # left side of equation is a count, so this is a count
+pred_dt$pred_negbin <- exp(predict(mod_negbin, newdata = pred_dt))
+pred_dt$pred_lograte <- exp(predict(mod_lograte, newdata = pred_dt)) # this is a predicted rate, 
+pred_dt$pred_lograte <- pred_dt$pred_lograte * pred_dt$population # multiply by population to get count
+pred_dt$pred_linrate <- predict(mod_linrate, newdata = pred_dt) * pred_dt$population
+pred_dt$pred_lincount <- predict(mod_lincount, newdata = pred_dt)
+
+ggplot(pred_dt, aes(x = mda_rounds)) +
+  geom_point(data = dt, aes(y = ov16_eval_positive)) + 
+  theme_classic() + 
+  geom_line(aes(y = pred_pois, col = "Poisson")) +
+  geom_line(aes(y = pred_negbin, col = "Negative binomial")) +
+  geom_line(aes(y = pred_lograte, col = "Log-linear")) +
+  geom_line(aes(y = pred_linrate, col = "Linear rate")) +
+  geom_line(aes(y = pred_lincount, col = "Linear count")) +
+  scale_color_discrete("") + 
+  theme(legend.position = "bottom") + 
+  scale_x_continuous("MDA rounds (n)", limits = c(0,5)) + 
+  scale_y_continuous("Count positive oocytes", limits = c(15,70))
+
+ggplot(pred_dt, aes(x = mda_rounds)) +
+  geom_point(data = dt, aes(y = ov16_eval_positive)) + 
+  theme_classic() + 
+  geom_line(aes(y = pred_pois, col = "Poisson")) +
+  geom_line(aes(y = pred_lograte, col = "Log-linear")) +
+  geom_line(aes(y = pred_negbin, col = "Negative binomial")) +
+  geom_line(aes(y = pred_linrate, col = "Linear rate")) +
+  geom_line(aes(y = pred_lincount, col = "Linear count")) +
+  scale_color_discrete("") + 
+  theme(legend.position = "bottom") + 
+  scale_x_continuous("MDA rounds (n)", limits = c(0,20)) +
+  scale_y_continuous("Count positive oocytes", limits = c(-10,70))
+```
+
+### Individual count models
+
+We don't have an example of this from the homework 1 data, but think about if your data are on the individual level and your outcome is a count. For example, the number of episodes of diarrhea per child. A poisson model would be appropriate here if you wanted to model episodes as a function of some predictors. You can use child-time the same way:
+
+$$
+log(\frac{episodes}{time}) \sim X = log(episodes) \sim log(time) + X
+$$
+
+More complicated time to event models will be covered later!
+
+### Generalized linear mixed models (GLMMs)
+
+We can use the $lme4$ package to run mixed models in the same way.
+
+```{r}
+mixed_pois <- glmer(ov16_eval_positive ~ offset(log(population)) + mda_rounds +
+                      (1 | admin2id), 
+                    data = dt, family = "poisson")
+mixed_negbin <- glmer.nb(ov16_eval_positive ~ offset(log(population)) + mda_rounds +
+                        (1 | admin2id), 
+                        data = dt)
+
+summary(mixed_pois)
+summary(mod_pois)
+
+AIC(mod_pois, mod_negbin, mixed_pois, mixed_negbin)
+BIC(mod_pois, mod_negbin, mixed_pois, mixed_negbin)
+```
+
+# End for this week!!

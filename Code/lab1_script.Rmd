@@ -1,0 +1,387 @@
+---
+title: "Lab 1"
+author: "Chris Troeger"
+date: "January 13, 2022"
+output: html_document
+---
+
+## Introduction
+
+For the lab demonstration today, we will be using the *MDA_Coverage.csv* file that is posted on Canvas and is part of Homework 1. 
+
+### Goals for this session
+
+* Introduction to R Markdown
+* Review of basic data management in R
+* Plotting and linear regression
+
+## Preparing environment
+
+Data loading and manipulation R has an "environment". Essentially this means that R can contain a variety of packages, data, and other objects  at the same time. 
+
+```{r, warning = F, message = F}
+## Libraries
+  library("ggplot2")      # Plotting
+  library("lme4")         # Mixed-models
+  library("data.table")   # Data manipulation
+  library("reshape2")     # Data manipulation
+  library("knitr")        # Markdown helper
+```
+
+You can assign a name to a data frame by the "<-" or "=" sign. I am going to load the data and assign to an object called *dt*.
+
+```{r}
+## Data
+# I am reading in the data again later, so I am saving
+# a backup
+  dt <- read.csv("C:/Users/ctroeger/OneDrive - UW/PhD/GH Teaching Assistant/Data/MDA_Coverage.csv")
+  back_up_dt <- dt
+
+```
+
+## Data inspection
+
+There are a few things that we can do to investigate our data. Let's do some descriptive statistics.
+
+```{r}
+# What are the columns? How are they structured?
+  head(dt)
+  str(dt)
+
+# Descriptive statistics
+# Often, we will want to learn more about our data before running
+# any analyses on them. summary() is a good way to quickly see
+# our data 
+  summary(dt)
+  
+  # Perhaps, we will want to see distributions. Histograms are a good option
+  hist(dt$COV_99)
+  
+  # Or maybe correlations
+  cor(dt$COV_99, dt$COV_03) # Why does this return an NA?
+  # It returns an NA because there are missing values in COV_99 and/or COV_03
+  cor(dt$COV_99, dt$COV_03, use = "complete.obs")
+  
+  # cor.test provides p-values and uses complete observations by default
+  cor.test(dt$COV_99, dt$COV_03)
+  
+  # How about a t-test?
+  t.test(dt$COV_99, dt$COV_03)
+```
+
+For a very basic example, we are going to see if coverage in 2003 (COV_03) can be predicted by coverage in 1999 (COV_99). Let's do some plots of the distributions. Base R produces plots that Bobby prefers. I (Chris) prefer *ggplot2*, but it has a much different syntax that can be hard to learn.
+
+```{r, warning = F, message = F}
+# Base R
+  plot(dt$COV_99, dt$COV_03)
+
+# ggplot2 (my preferred plotting)
+  ggplot(dt, aes(x = COV_99, y = COV_03)) + # Uses 'dt' and defines plotting characteristics (aesthetics)
+    geom_point()                            # Tells ggplot to make a scatter
+  
+```
+
+Hard to tell much. Let's run a linear model.
+
+## Linear and generalized linear models
+
+A linear model will quantify this relationship for us.
+
+```{r}
+  mod1 <- lm(COV_03 ~ COV_99, data = dt)
+  summary(mod1)
+```
+
+Neat(ish), there is a non-significant positive relationship between coverage in those years. 
+
+What if we only cared if coverage in 2003 is greater than 90%? This is kind of a forced example but I want to show a *generalized linear model*
+
+```{r}
+# Is value > 90%?
+  dt$high_cov <- ifelse(dt$COV_03 > 90, 1, 0)
+  table(dt$high_cov)
+```
+
+We have a new variable that is binary. An appropriate model for this outcome is a logistic regression (binomial). 
+
+```{r}
+  mod2 <- glm(high_cov ~ COV_99, data = dt, family = "binomial")
+  summary(mod2)
+```
+
+How do we interpret these results? Recall that the coefficients from a binomial model are log(odds ratios). So, we can exponentiate.
+
+```{r}
+  odds <- exp(coef(mod2))
+  odds
+```
+So, for each 1 unit increase in coverage in 1999, the odds that coverage in 2003 is greater than 90% increases by 1.16 times. 
+
+### Predictions
+
+Recall that making predictions from linear models in R is pretty easy.
+
+```{r, warning = F, message = F}
+# Make prediction
+  dt$pred1 <- predict(mod1, newdata = dt)
+
+# Plot it (won't work so well if there is more than 1 predictor... why?)
+  ggplot(dt, aes(x = COV_99, y = COV_03)) + geom_point() + geom_line(aes(y = pred1))
+  
+```
+
+ggplot() has a nice shortcut for linear models, the only downside is that you can't easily see the model summaries (like the coefficients, R^2, etc).
+
+```{r, warning = F, message = F}
+  ggplot(dt, aes(x = COV_99, y = COV_03)) + geom_point() +
+      stat_smooth(method = "lm", se = F, col = "red") # lm = linear model, se = F means don't plot predicted standard errors
+```
+
+R is not that smart about making predictions from generalized models, however. The modeler (you) must transform back to linear space.
+
+```{r}
+# Predict our binomial model
+  dt$pred2 <- predict(mod2, newdata = dt)
+  head(dt) # our values are negative!
+  
+# That's because a binomial model logit-transforms the outcome (high_cov) so
+# so we must back-transform it (inverse logit).
+# There are packages with that function but let's make it ourselves for practice.
+  inv_logit <- function(x){
+    y <- exp(x) / (1 + exp(x))
+    return(y)
+  }
+  
+  dt$pred2_linear <- inv_logit(dt$pred2)
+  head(dt)
+```
+
+## Generalized linear mixed models (GLMMs)  
+
+Linear mixed models are models that incorporate grouping, clustering, or repeated measurements from a dataset into a statistical regression model. I will try to consistently use the term *hierarchical* to describe data that were generated in this way. *Generalized* is a way to extend linear models to transformed outcomes (log, logit, Poisson, etc). Other names for this model structure are:
+
+* Hierarchical models
+* Mixed-effects models
+* Random-effects models (random intercepts; random slopes)
+* Multi-level models
+
+### Transform our data as a dummy example
+
+These data are actually clustered. We have repeated measurements (coverage) by administrative unit in Burkina Faso. Let's restructure our data to a *long* format to see them in this way.
+
+```{r}
+# re-assign the data again so I don't have the prediction columns
+  dt <- back_up_dt
+
+## For this example, I am going to re-structure the data so they are "long"
+  dtl <- melt(dt, id.vars = c("OBJECTID","ADMIN0","ADMIN2","ADMIN2ID"))
+  
+## Create a "year" variable
+  dtl$year <- substr(dtl$variable, 5, 6) # keep the 5th and 6th characters
+  dtl$year <- ifelse(dtl$year == "99", 1999, as.numeric(dtl$year) + 2000)
+  head(dtl)
+```
+
+### Let's plot these newly reshaped data
+
+```{r, warning = F, message = F}
+  ggplot(dtl, aes(x = year, y = value)) + geom_point()
+```
+
+We know that these data come from repeated observations within administrative units. Let's plot that. Because there are so many, let's just plot a few of the administrative units. I am also using a shortcut. *ggplot* has a function (*stat_smooth()*) that can fit linear models to our data.
+
+```{r, warning = F, message = F}
+  ggplot(dtl[dtl$ADMIN2 %in% c("Banfora","Batie","Leo","Manga","Pama","Toma"), ], 
+         aes(x = year, y = value, col = ADMIN2)) + geom_point() + 
+    theme_bw() + 
+    stat_smooth(method = "lm", se = F) # fits a linear model, suppresses standard errors
+```
+
+From this example, we see that there are clearly different starting places for coverage in 1999 (intercept) and different slopes by year. 
+
+Let's first fit three models:
+
+1. $y_i \sim \beta_0 + \beta_1Year_i + epsilon_i$
+2. $y_i \sim \beta_0 + \alpha_{0,j} + \beta_1Year_i + epsilon_i$
+3. $y_i \sim \beta_0 + \alpha_{0,j} + (\beta_1 + \gamma_{1,j})Year_i + epsilon_i$
+
+The first model is a linear model that doesn't account for the repeated observations with an administrative unit. The second model includes a random intercept
+
+$\alpha_{0,j} \sim N(0,\sigma^2_{\alpha})$
+
+The third model includes a random slope and a random intercept.
+
+$$\begin{aligned}  \\
+\begin{pmatrix}
+\alpha_{0,j} \\
+\gamma_{1,j} 
+\end{pmatrix} \sim N \left[ \begin{pmatrix}
+0 \\
+0 
+\end{pmatrix},
+\begin{pmatrix}
+\sigma^2_{\alpha_0} & \rho \sigma_{\alpha_0} \sigma_{\gamma_1}\\
+\rho \sigma_{\alpha_0} \sigma_{\gamma_1} & \sigma^2_{\gamma_1}
+\end{pmatrix} \right] \\
+\end{aligned}$$
+
+We also see quite a few missing values:
+
+```{r}
+  nrow(dtl)
+  nrow(dtl[is.na(dtl$value),])
+```
+
+What should we do about them? For this demonstration, I am going to use them as an opportunity to create a new dummy variable that indicates if an ADMIN2 has any missing data. The reason I am doing this is to practice with merging datasets, something you will need to do for the homework.
+
+```{r}
+# Find the ADMIN2 areas with missing values
+  missing <- dtl[is.na(dtl$value),]
+
+# Some areas have multiple missing values. For this exercise, I want unique areas.
+  missing <- missing[, c("ADMIN2", "ADMIN2ID")]
+  missing <- unique(missing)
+  
+# Create a dummy indicator that this area has missing values
+  missing$has_missing <- 1
+  
+# Now, use the merge() function to merge back with our data
+# Note a few options for merge() that we discussed in lab
+# by default, it will only keep rows from the first
+# dataframe that have a match in the second
+# You can also specify to keep all rows in dataset 1 regardless of matching
+# or keep all rows in dataset 2 regardless of matching,
+# or finally keep all rows in both datasets (many:many)
+
+# Let's test that
+  dtl_1 <- merge(dtl, missing, by = "ADMIN2")
+  dtl_m1 <- merge(dtl, missing, by = "ADMIN2", all.x = T)
+  dtl_1m <- merge(dtl, missing, by = "ADMIN2", all.y = T)
+  dtl_mm <- merge(dtl, missing, by = "ADMIN2", all = T)
+
+# What I want for this example is to keep all ADMIN2 units
+# and all rows, in the full dataset
+  dtl <- merge(dtl, 
+               missing, 
+               by = "ADMIN2", # This is the variable that needs to exist in both datasets to merge with.
+               all.x = T)     # If I don't add this, I will lose locations that aren't in 'missing', the 
+                              # opposite of what I want!
+
+
+  
+  dtl$has_missing <- ifelse(is.na(dtl$has_missing), 0, 1)
+
+```
+
+```{r}
+  linmod <- lm(value ~ year, data = dtl)
+  rintmod <- lmer(value ~ year + (1 | ADMIN2), data = dtl)
+  rslpmod <- lmer(value ~ year + (1 + year | ADMIN2), data = dtl) # This is a poor model!
+```
+
+The last model is Singular! That is **bad**. Don't use a model that is singular. This means that if you know the value of one parameter, you can nearly perfectly predict another. Let's see if we can figure out what happened.
+
+```{r}
+  summary(rslpmod)
+```
+
+There are two places we should look. First, the correlation of the random effects (intercept and slope on year) has a value of -0.99 (in the Random effects section). Second, the correlation of the fixed effects (intercept and year) is -1.00 (very bottom of output). This is not good for the model! It means that there is an almost perfect negative correlation between intercept and slope. If you know the slope on year, you can perfectly predict the intercept!
+
+Predicting from these models is the same as predicting a linear model
+
+```{r}
+  dtl$predlin <- predict(linmod, newdata = dtl)
+  dtl$predrint <- predict(rintmod, newdata = dtl)
+  dtl$predrslp <- predict(rslpmod, newdata = dtl)
+```
+
+If we try to plot this, we get something that is probably not what we expected to see
+
+```{r, warning = F, message = F}
+  ggplot(dtl, aes(x = year, y = value)) + geom_point() +
+      geom_line(aes(y = predrslp))
+```
+
+We must tell ggplot that the lines are part of different "grouping" variable (think of this like our clusters)
+```{r, warning = F, message = F}
+  ggplot(dtl, aes(x = year, y = value)) + geom_point() +
+      geom_line(aes(y = predrslp, group = ADMIN2))
+```
+
+There we go! However, even when we allow for random slopes, the slopes are nearly all identical (recall that this model has some fundamental problem related to the correlation in year and intercept so most mixed-effects models won't look like this).
+
+We might be interested in the overall prediction, something that we couldn't easily see from that plot above. So, often in a GLMM model, we are not interested in individual groups (ADMIN2), we are interested in the overall fit. We can create a skeleton dataframe:
+
+```{r, warning = F, message = F}
+  mm_pred <- data.frame(year = unique(dtl$year),
+                        ADMIN2 = "New") # If you tell it an existing ADMIN2, you will get the prediction
+                                        # including the random effects
+  mm_pred$predlin <- predict(linmod, newdata = mm_pred)
+  
+# new.levels are random effect groups that don't exist in the original dataset. These
+# groups will be predicted with the overall intercept and slope
+  mm_pred$predrint <- predict(rintmod, newdata = mm_pred, allow.new.levels = T)
+  mm_pred$predrslp <- predict(rslpmod, newdata = mm_pred, allow.new.levels = T)
+  
+# Complicated ggplot to see results
+  ggplot(mm_pred, aes(x = year)) + 
+    geom_point(data = dtl, aes(x = year, y = value)) +
+    geom_line(aes(y = predlin, col = "Linear")) + 
+    geom_line(aes(y = predrint, col = "Random Intercept")) +
+    geom_line(aes(y = predrslp, col = "Random Slope")) +
+    theme_bw()
+  
+```
+
+The model fits are nearly identical. 
+
+We can extract information from this model using *coef()* and *fixef()*. 
+
+```{r}
+  coef(linmod)
+  fixef(rintmod)
+  fixef(rslpmod)
+```
+
+The coefficient on $\beta_1$, for year, hardly changed between the models. What about the standard error of the estimate?
+
+```{r}
+# We can get that from the summaries
+# kable() is a nice function to produce tables
+# kable() will print a dataframe so I am 
+# artificially creating one by rbind() the 
+# coefficients from the models. 
+  kable(rbind(summary(linmod)$coefficients[2,1:3],
+              summary(rintmod)$coefficients[2,],
+              summary(rslpmod)$coefficients[2,]),
+        caption = "Coefficients for year")
+  
+# Or we can get that from the variance-covariance matrix
+# A variance covariance matrix has the variance within
+# coefficients in a model in the "diagonal". So we use
+# the function diag() in R. However, that is the variance
+# (thus the name) but the standard error of the estimate
+# is more often reported, so we take the square root of that
+# sqrt(). Lastly, I want to report the standard error of 
+# the beta on year, so I ask for the second observation
+# (the first observation would be the standard error of
+# the intercept term). 
+# vcov() prints the variance-covariance matrix
+  vcov(linmod)
+  
+  lin_se <- sqrt(diag(vcov(linmod)))[2]
+  print(paste0("The standard error on year for the linear model is: ",
+               round(lin_se, 2)))
+
+```
+
+The last potentially useful thing would be to determine which of these models is "best"
+
+```{r}
+AIC(linmod, rintmod, rslpmod)
+BIC(linmod, rintmod, rslpmod)
+```
+
+The goodness of fit statistics suggest that the linear model is best!
+
+## End! I think you have the tools to do Homework 1 now!

@@ -1,0 +1,161 @@
+---
+title: "Survival Analysis"
+author: "Chris Troeger"
+date: "2/23/2022"
+output: html_document
+---
+
+# Demonstration of survival analysis in R
+
+### Brazilian Nutrition cohort data
+
+```{r}
+library(survival)
+library(data.table)
+library(RColorBrewer)
+library(ggplot2)
+library(GGally)
+library(parameters)
+library(gridExtra)
+
+COLS <- brewer.pal(3, "Set2")
+
+# Setting personal working directory
+os <-  "pc"
+
+if(os  == "mac"){
+  setwd("~/Documents/OneDrive - UW/PhD/GH Teaching Assistant/Data")
+} else {
+  setwd("C:/Users/ctroeger/OneDrive - UW/PhD/GH Teaching Assistant/Data/")
+}
+
+# Read in data
+dt <- fread("Nutrimal_supp.csv")
+
+head(dt)
+
+```
+
+The `Surv()` function creates a "survival object" which we will use as the outcome (response) variable in a statistical model. `Surv(time, event)` where `time` is the followup time and `event` is if the event occurs for an observation. 
+
+Our data already has this value, time to malaria  
+
+```{r}
+ggplot(dt, aes(x = time_to_first_malaria)) + 
+  geom_histogram(binwidth = 30, col = "black", fill = "lavender") + theme_classic() + ggtitle("All children")
+
+ggplot(dt[malariasn1 == "sim"], aes(x = time_to_first_malaria)) + 
+  geom_histogram(binwidth = 30, col = "black", fill = "skyblue") + theme_classic() + ggtitle("Children with malaria")
+```
+
+Children appear to have malaria throughout the follow up year. 
+
+The `survfit()` function creates hazard curves by finding the proportion that has not seen an event at each `time_to_first_malaria` step. I'm going to look at growth trajectory as a predictor of risk of malaria. 
+
+I will use `survfit()` to create two lines, one for each growth assessment (adequate/inadequate). This is not a statistical model, it is simply showing the failure rates for each group. 
+
+Two ways are shown. The first is the way that Bobby illustrated in class which uses the base R `plot()` function. The second is a function from a ggplot helper package `GGally`. 
+
+```{r}
+# Survival analysis time_to_first_malaria
+# set malaria as the outcome
+dt$malaria <- ifelse(dt$malariasn1 == "sim", 1, 0)
+dt$anemia_entrance <- ifelse(dt$anemia_entrada == "99", NA,
+                             ifelse(dt$anemia_entrada == "sim", 1, 0))
+dt <- dt[time_to_first_malaria <= 365]
+dt[, growth_trajectory := ifelse(diagvelocidadecres == "adequada",
+                                 "Adequate", "Inadequate")]
+
+
+hcurves <- survfit(Surv(time_to_first_malaria, malaria) ~ growth_trajectory, data = dt)
+
+# plot.survfit() is much more efficient to plot the hazard curves
+plot(survfit(Surv(time_to_first_malaria, malaria) ~ growth_trajectory, data = dt),col=COLS[1:2], ylim=c(0, 1))
+legend("bottomleft", legend=c("Adequate","Inadequate"), lty=c(1 ,1), inset=0.02,col=COLS[1:2])
+
+# There is also a ggplot function in the package GGally
+ggsurv(hcurves) + geom_ribbon(aes(ymin=low,ymax=up,fill=group),alpha=0.3) +
+  theme_classic() + guides(fill = "none")
+```
+
+### Cox Proportional Hazards
+
+So we can see that there is an apparent difference in malaria risk by growth trajectory. Let's use a statistical survival model to see if the difference is statistically significant.
+
+Our function is `coxph()` which will run a Cox proportional hazards model. We use the `Surv()` object as the response in our formula.
+
+```{r}
+cmod <- coxph(Surv(time_to_first_malaria, malaria) ~ growth_trajectory, data = dt)
+summary(cmod)
+
+ggsurv(survfit(cmod)) + theme_classic()
+```
+
+We can again use `survfit()` to plot our Cox model
+
+```{r}
+cox_fit <- survfit(cmod, newdata = data.frame(growth_trajectory = c("Adequate", "Inadequate")))
+
+plot(cox_fit,mark=NA,conf.int=TRUE,col=COLS[1:2],lty=c(1,2), ylim = c(0.5,1))
+legend("bottomleft", legend=c("Adequate", "Inadequate"), lty=c(1 ,2), inset=0.02,col=COLS[1:2])
+```
+
+If we want more control over plotting, we need to understand the survfit objects better. 
+
+Let's start with thinking about what it does with raw data. 
+
+```{r}
+my_data <- dt[, lapply(.SD, function(x) sum(x)),
+              .SDcols = c("malaria"),
+              by = c("time_to_first_malaria","growth_trajectory")]
+my_data <- my_data[order(time_to_first_malaria)]
+
+n_inadequate <- 137
+n_adequate <- 64
+my_data[, children := ifelse(growth_trajectory == "Inadequate",
+                              n_inadequate, n_adequate)]
+
+my_data[, events := cumsum(malaria), by = "growth_trajectory"]
+my_data[, survival := 1 - events / children]
+
+a <- ggsurv(hcurves) + ggtitle("Survfit")
+b <- ggplot(my_data, aes(x = time_to_first_malaria, y = survival, col = growth_trajectory)) + geom_step() + theme_classic() + ggtitle("Manual")
+
+grid.arrange(a, b, ncol = 2)
+```
+
+Now, we need to pull information from the `survfit coxph` object. Remember that `survfit` makes hazard curves. It can do this from a `Surv` formula from a `coxph` object. 
+
+The returned information is in a list. Let's investigate that:
+
+```{r, eval = F}
+View(cox_fit)
+```
+
+With this information, I can figure out how to extract the values I am interested int. 
+
+```{r}
+
+my_estimate <- data.frame(time = rep(cox_fit$time, ncol(cox_fit$surv)),
+                      survival = c(cox_fit$surv[,1], cox_fit$surv[,2]),
+                      lower = c(cox_fit$lower[,1], cox_fit$lower[,2]),
+                      upper = c(cox_fit$upper[,1], cox_fit$upper[,2]),
+                      growth_trajectory = c(rep("Adequate", length(cox_fit$time)),
+                                            rep("Inadequate", length(cox_fit$time))))
+
+ggplot(my_estimate, aes(x = time, y = survival, col = growth_trajectory)) +
+  geom_step() + geom_ribbon(aes(ymin = lower, ymax = upper, fill = growth_trajectory), alpha = 0.4) + guides(fill = "none") +
+  geom_point(data = my_data, aes(x = time_to_first_malaria, y = survival,
+                                 col = growth_trajectory), alpha = 0.8) +
+  theme_classic()
+
+```
+
+Let's compare with if we used a `glm(family = binomial(link = log))`
+
+```{r}
+gmod <- glm(malaria ~ growth_trajectory, data = dt, family = binomial(link = "log"))
+
+print_md(model_parameters(cmod, exponentiate = T))
+print_md(model_parameters(gmod, exponentiate = T))
+```

@@ -1,0 +1,90 @@
+---
+title: "Using R Markdown"
+author: "Chris Troeger"
+date: "January 13, 2022"
+output: pdf_document
+urlcolor: blue
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Hello World!
+
+This file was created using R Markdown, a feature ready for use in RStudio. To create a new Markdown file, follow these steps in an RStudio window: 
+
+*File -> New File -> RMarkdown* 
+
+When you create a new Markdown file, you can fill in the Title and Author you want as well as select the type of document. The options that are most useful, in my opinion, are *html_document* and *pdf_document*. This autogenerates text at the top of the code script that is invisible in the final document. The text is *yaml* script and tells Markdown how to format itself. I don't recommend editing it directly until you get a sense of how it works. 
+
+For this class, I anticipate assignments will be submitted as either a Word or PDF document. Using R Markdown is very convenient for reporting statistical and data analyses because the code and output is automatically embedded into your final document. It is also convenient for reproducibility and replicability. 
+
+I hope that you see how useful R Markdown can be!
+
+## R Markdown Documents
+
+R Markdown documents are created from a combination of text and R code. There is the *.Rmd* file which contains all the information for Markdown, any text for the document, and the code you want to run. 
+
+When you click the **Knit** button (on the bar just below your script tabs), all R code chunks are run and a markdown file (.md) is created. Depending on the output type you've chosen (HTML, PDF, Word), another file of that type will be created!
+
+## PDF and Word output
+
+By far the most frustrating error I have encountered using R Markdown is *knitting* to a PDF or Word document. The reason is that R needs a program called *LaTeX* to convert the .md (markdown) file to these file types. 
+
+The easiest way to install all dependencies is by installing *tinytex* ([resources here](https://yihui.org/tinytex/)). You'll see on the website the quote: "To compile an R Markdown document to PDF, there is nothing else you have to know." 
+
+```{r, eval = F}
+install.packages('tinytex')
+tinytex::install_tinytex()
+# to uninstall TinyTeX, run tinytex::uninstall_tinytex() 
+```
+
+Note that the `eval = FALSE` parameter was added to the code chunk to prevent running of the R code (I already have that package installed and don't want to keep updating it!).
+
+## Including Code
+
+You have seen one example of code in the lines immediately above. To separate code from text, you must specify a "chunk" that tells Markdown that there is R code below. You can include R code in the document as follows:
+
+```{r}
+data(cars)
+summary(cars)
+```
+
+Note that you must include the three "`" to start and end the chunk.
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+plot(pressure)
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+
+## More tips:
+
+There are a number of excellent resources for Markdown. Markdown is not specific to R, it is a text and code style formatting system. My favorites are:
+
+* [R Markdown's Homepage](https://rmarkdown.rstudio.com/)
+* [Definitive Guide to R Markdown](https://bookdown.org/yihui/rmarkdown/)
+
+Another nice feature of Markdown is formatting mathematical equations. You can write them inline like this $y \sim \beta_0 + 5x + constant$ or you can write them centered like this
+
+$$
+y \sim \beta_0 + 10x + shift
+$$
+
+You can **bold** text by adding two asterisks around a word or group of words (`**my text is bold**`). You can make text *italicized* by adding one asterisk around a word or group of words (`*this text is italic*`)
+
+Headers can be created using `#` icons. I like using `##` for different sections, but that's a style choice!
+
+# Big (`# Big`)
+## Pretty big (`## Pretty big`)
+### Smaller (`### Smaller`)
+
+There are lots more things you can do. 
+
+# Good luck!
+

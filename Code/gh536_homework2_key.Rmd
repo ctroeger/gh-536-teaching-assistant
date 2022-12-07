@@ -1,0 +1,304 @@
+---
+title: "GH 536 - Key Homework 2"
+author: "Chris Troeger"
+date: "February 3, 2022"
+output: html_document
+urlcolor: blue
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(knitr)
+library(data.table)
+library(lme4)
+library(ggplot2)
+library(sjPlot)
+library(parameters)
+
+# log-binomial model https://ete-online.biomedcentral.com/articles/10.1186/1742-7622-10-14
+# https://stats.oarc.ucla.edu/stata/faq/how-can-i-estimate-relative-risk-using-glm-for-common-outcomes-in-cohort-studies/
+```
+
+# Question 1: Logistic and log binomial models
+
+## 1.1 What type of regression model was used in the [publication](https://journals.plos.org/plosntds/article?id=10.1371/journal.pntd.0003743#sec019)? List the independent variables and how they were coded. What variables were used as outcomes?
+
+The Authors performed univariate and multivariate logistic regression models to assess the association between prevalence of malaria in the study period (*malariasn1*) and four markers of childhood growth. The dependent variables in this analysis were  height for age and weight for age z-scores (HAZ and WAZ), body-mass index z-score (BMI-Z), and growth velocity which the Authors defined as the change in these metrics between baseline and followup (about a year). These variables in the dataset are listed as *HAZ1*, *WAZ1*, *BAZ1*, and *WHZ*. These variables are continuous. To use them in The height, weight, and BMI variables are standardized to represent z-score deviations from the global mean score for child age. To make them dichotomous outcomes, the Authors set {0,1} to if the z-scores were above ("adequado", 0) or below ("inadequado", 1) -2 z-scores. This cutoff was used because it is a widely defined separator between "normal" growth and "poor" growth. 
+
+The Authors controlled for age of children (*age_at_entry*), maternal education (not sure which variable this is), socio-economic status (*socioeconomico*), and sex (*sexo*) in their multivariate analyses. They also controlled for the number of malarial episodes (*n_malaria*) and the time between last malaria to second assessment of growth indicators (I think this was *malaria_cat*). 
+
+The Authors stratified the analysis by child age: under 5, 5-10, and 10-14 years old
+
+### Load in the data, investigate
+
+
+```{r}
+# Setting personal working directory
+os <-  "pc"
+
+if(os  == "mac"){
+  setwd("~/Documents/OneDrive - UW/PhD/GH Teaching Assistant/Data")
+} else {
+  setwd("C:/Users/ctroeger/OneDrive - UW/PhD/GH Teaching Assistant/Data/")
+}
+
+# Read in data
+dt <- fread("Nutrimal_supp.csv")
+
+head(dt)
+
+summary(dt[, c("malariasn1","anemia_saida","anemia_entrada","sexo","socioeconomico","helmintosentrada")])
+
+# Simple logistic regression model
+# Convert to binary response
+dt[, anemia_binary := ifelse(anemia_saida == "sim", 1, 
+                             ifelse(anemia_saida == "99", NA, 0))]
+
+# Prep for 2x2 questions
+dt_complete <- dt[anemia_saida != 99] # remove when anemia_saida is 99 (missing)
+
+# Relevel the factors to be ordered in the way I want
+dt_complete[, anemia_saida := factor(anemia_saida, levels = c("sim","nao"),
+                                                              labels = c("Anemia","No anemia"))]
+dt_complete[, malaria_factor := factor(malariasn1, levels = c("sim","nao"),
+                                   labels = c("Malaria","No malaria"))]
+tbl <- table(dt_complete$anemia_saida, dt_complete$malaria_factor)
+tbl
+
+a <- 33
+b <- 48
+c <- 33
+d <- 68
+
+```
+
+## 1.2 Estimate the risk of anemia at study end among child who experienced a malaria infection at any time during the study
+
+
+$$
+Risk = \frac{A}{(A+B)}
+$$
+
+The risk of anemia at study end among children with any malaria during the study is 33 / (33 + 48) = `r round(33/81,3)`.
+
+## 1.3 How many children had anemia at study exit? How many were exposed to malaria during the study?
+
+There are `r nrow(dt)` children in this study. There were `r sum(dt$anemia_binary, na.rm = T)` children with anemia at study end and `r nrow(dt[malariasn1 == "sim"])` children had malaria during the study. There were 20 children with missing anemia prevalence at study end. 
+
+\pagebreak
+## 1.4 Calculate the crude odds ratio for the association between malaria infection and anemia
+
+The odds ratio is defined as
+
+$$
+OR = \frac{A*D}{B*C}
+$$
+
+```{r}
+
+c_or <- (a*d)/(b*c)
+
+```
+
+The crude odds ratio is `r round(c_or, 2)`. 
+
+\pagebreak
+## 1.5 Estimate the crude odds ratio and confidence intervals using glm()
+
+
+```{r}
+# Don't model responses where value is 99
+mod1 <- glm(anemia_binary ~ malariasn1, family = "binomial", data = dt[anemia_saida != 99])
+summary(mod1)
+risk_anemia <- exp(sum(coef(mod1)))
+fitted_or <- exp(mod1$coefficients[2])
+
+# Pull out SE from variance covariance
+fitted_se <- sqrt(diag(vcov(mod1)))[2]
+fitted_or_ci_l <- exp(mod1$coefficients[2] - fitted_se * qnorm(0.975))
+fitted_or_ci_u <- exp(mod1$coefficients[2] + fitted_se * qnorm(0.975))
+
+odds = paste0(round(fitted_or, 2), 
+              " (95% CI ", round(fitted_or_ci_l, 2),"-", 
+              round(fitted_or_ci_u,2),")")
+
+```
+The odds of anemia given malaria was `r odds`. 
+
+
+```{r, echo = F, eval = F}
+
+# **For the glm() to estimate the relative risk, I will accept either a Poisson or a log-binomial model.**
+# 
+# A log-binomial model is probably a better option to estimate the relative risk of a binary outcome (presence of anemia y/n, cumulative incidence of an event, etc). Although the point estimates will be the same, the uncertainty from a Poisson model will probably be incorrect. This is because a Poisson distribution assumes that the values can be zero or any positive integer. However, our observed outcomes in the anemia variable are only 0 or 1. 
+# 
+# The code below shows how to fit a log-binomial model. This model takes many of the same assumptions as a logistic binomial model but instead assumes a logarithmic relationship between the exposure and response. A log-binomial model returns a log-relative-risk estimate instead of a log-odds. So we can find the exponent of the coefficient to get a relative risk. We will also note that the estimated standard error in this model matches the one we calculated by hand.
+# 
+# Now we need to fit a Poisson (or perhaps log-binomial) model to get the risk ratio.
+
+mod2 <- glm(anemia_binary ~ malariasn1, family = binomial(link = "log"), data = dt_complete)
+summary(mod2)
+fitted_rr <- exp(mod2$coefficients[2])
+
+## You could also use a Poisson model
+mod2b <- glm(anemia_binary ~ malariasn1, family = poisson, data = dt_complete)
+summary(mod2b)
+
+# Pull out SE from variance covariance
+fitted_se <- sqrt(diag(vcov(mod2)))[2]
+fitted_rr_ci_l <- exp(mod2$coefficients[2] - fitted_se * qnorm(0.975))
+fitted_rr_ci_u <- exp(mod2$coefficients[2] + fitted_se * qnorm(0.975))
+
+results <- data.table(odds = paste0(round(fitted_or, 2), 
+                                    " (", round(fitted_or_ci_l, 2),"-", 
+                                    round(fitted_or_ci_u,2),")"),
+                      rr = paste0(round(fitted_rr, 2), 
+                                  " (", round(fitted_rr_ci_l, 2),"-", 
+                                  round(fitted_rr_ci_u, 2),")"))
+
+kable(results, col.names = c("Odds ratio", "Risk ratio"))
+```
+
+
+\pagebreak
+## 1.6 Estimate an adjusted odds ratio including anemia_entrada, sexo, socioeconomico in the model
+
+```{r}
+dt_complete <- dt_complete[anemia_entrada != "99"]
+dt_complete[, sexo := factor(sexo, levels = c("masculino","feminino"))]
+dt_complete[, socioeconomico := factor(socioeconomico, levels = c("rich","middle","poor"))]
+
+mod3 <- glm(anemia_binary ~ malariasn1 + anemia_entrada + sexo + 
+              socioeconomico, data = dt_complete, family = "binomial")
+
+a_or <- exp(coef(mod3)[2])
+```
+
+```{r, echo = F}
+print_md(model_parameters(mod3, exponentiate = T))
+```
+
+After adjusting for anemia at study entrance, child sex, and socio-economic status, the estimated odds ratios are very similar to the crude estimates (nearly unchanged). The only predictor that was statistically significant in these models was the prevalence of anemia at study entrance. These children were more than twice as likely to have anemia at study end than children who were not anemic at study start.
+
+
+\pagebreak
+# Question 2: Use poisson regression to estimate incidence of first malaria infection.
+
+## 2.1 Create a tabular dataset for the research question
+
+*Note*: I am creating a new variable called **helminth_entrance** to use in the regression. 
+
+*Note*: I am recoding the `socioeconomico` variable, so don't be surprised if your coefficients are different.
+
+```{r}
+# I'm assuming children who 'malariasn1' = "nao" but time_to_first_malaria < 365 
+# are lost to follow up on that date
+dt[, had_malaria := ifelse(dt$malariasn1 == "sim", 1, 0)]
+# What does '99' mean for helmintosentrada?
+dt[, helminth_entrance := ifelse(helmintosentrada == 2, "No",
+                                 ifelse(helmintosentrada == 99, NA,"Yes"))]
+
+## Recode socioeconomico
+dt[, socioeconomico := factor(socioeconomico,
+                              levels = c("poor","middle","rich"))]
+
+## Tabulated data
+dt[, row := 1]
+tab_dt <- dt[, lapply(.SD, function(x) sum(x)),
+             by = c("sexo","socioeconomico","helminth_entrance"),
+             .SDcols = c("had_malaria", "time_to_first_malaria","row")]
+
+
+```
+
+The intention of this homework is to tabulate (aggregate/sum) the data to unique factors of the predictors listed in Question 2.4 (sex, helminth at entrance, socioeconomic status). I will accept an individual-level Poisson model or a tabulated model. 
+
+A tabulated dataset might produce better estimates of the standard error of the relative risk because the cumulative incidence must be either 0 or 1 (you can't have multiple *first* malaria infections). A Poisson model of a binary outcome could therefore have incorrect assumptions about the distribution of the response. 
+
+Let's look.
+
+```{r}
+count_mean <- mean(dt$had_malaria)
+tab_mean <- mean(tab_dt$had_malaria)
+
+count_var <- var(dt$had_malaria)
+tab_var <- var(tab_dt$had_malaria)
+
+ggplot(dt, aes(x = had_malaria)) + geom_histogram(col = "black", fill = "gray", binwidth = 0.1) +
+  theme_classic() + geom_vline(xintercept = count_mean, lty = 2)
+
+ggplot(tab_dt, aes(x = had_malaria)) + geom_histogram(binwidth = 1, col = "black", fill = "gray") +
+  theme_classic() + geom_vline(xintercept = tab_mean, lty = 2)
+
+```
+
+## 2.2 Calculate the crude incidence of malaria infections
+
+```{r}
+# I used the individual-level results but you should get the same if you used the tabulated ones. 
+incidence <- sum(dt$had_malaria) / sum(dt$time_to_first_malaria)
+```
+
+The incidence of malaria in this study population was `r round(incidence, 3)` episodes per person-day, `r round(incidence * 1000, 2)` episodes per 1000 person-days, `r round(incidence * 365, 3)` episodes per person-year.
+
+## 2.3 Use glm() to fit a Poisson regression for incidence
+
+First model is individual level (not shown)
+```{r}
+mod_pois <- glm(had_malaria ~ offset(log(time_to_first_malaria)), family = "poisson", data = dt)
+#print_md(model_parameters(mod_pois, exponentiate = T))
+```
+
+Second model is tabulated data
+```{r}
+modt_pois <- glm(had_malaria ~ offset(log(time_to_first_malaria)), family = "poisson", data = tab_dt)
+print_md(model_parameters(modt_pois, exponentiate = T))
+```
+
+The incidence of first malaria in this model is the same as when calculated by hand (reassuring!). It was `r round(exp(coef(mod_pois)) * 1000, 2)` episodes of malaria per 1000 person-days. 
+
+## 2.4 Add covariates `sexo`, `helmintosentrada`, `socioeconomico` to the model. Are any of the IRRs statistically significant?
+
+Individual level (not shown)
+```{r, eval = F}
+mod_pois2 <- glm(had_malaria ~ offset(log(time_to_first_malaria)) +
+                   helminth_entrance + sexo + socioeconomico, family = "poisson", data = dt)
+print_md(model_parameters(mod_pois2, exponentiate = T))
+```
+
+Tabulated data
+```{r}
+modt_pois2 <- glm(had_malaria ~ offset(log(time_to_first_malaria)) +
+                   helminth_entrance + sexo + socioeconomico, family = poisson, data = tab_dt)
+print_md(model_parameters(modt_pois2, exponentiate = T))
+```
+
+No predictors (covariates) are statistically associated with malaria in this population in this model. 
+
+\pagebreak
+## 2.5 Explore what happens when length of person-time is shortened. Reduce person-time among children with helmintosentrada = yes by 30%. What is the new IRR? Did this change the estimates as you expected?
+
+```{r}
+dt[, adjusted_person_time := ifelse(helminth_entrance == "Yes", 
+                                    time_to_first_malaria * 0.7, time_to_first_malaria)]
+tab_dt[, adjusted_person_time := ifelse(helminth_entrance == "Yes",
+                                        time_to_first_malaria * 0.7, time_to_first_malaria)]
+```
+
+This question is confusing. It says to include `sexo` but it also asks you to compare to the previous model.
+
+First model has only `helmintosentrado` and `sexo` and the second model has `socioeconomico`, too.
+
+```{r}
+mod_pois3 <- glm(had_malaria ~ offset(log(adjusted_person_time)) + helminth_entrance + sexo, 
+                 family = "poisson", data = tab_dt)
+print_md(model_parameters(mod_pois3, exponentiate = T))
+```
+
+```{r}
+modt_pois4 <- glm(had_malaria ~ offset(log(adjusted_person_time)) + helminth_entrance + sexo + socioeconomico, 
+                 family = "poisson", data = tab_dt)
+print_md(model_parameters(modt_pois4, exponentiate = T))
+```
+
+After adjusting the person-time among children with helminth infection at study entrance, the IRR is now 2.26 and significantly associated with the incidence of first malaria in this study population. This follows my intuition. The unadjusted incidence of first malaria was already greater in children with helminth infection at study start than children without helminth infection. If we artifically decrease the denominator of this group of children, that would make the incidence in this group greater, therefore leading to a higher IRR compared to children without helminth infection at study start. 

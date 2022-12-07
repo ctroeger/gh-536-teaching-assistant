@@ -1,0 +1,137 @@
+---
+title: 'Lab: Interaction Terms'
+author: "Chris Troeger"
+date: "2/9/2022"
+output: html_document
+---
+
+```{r, echo = F, message = F, warning = F}
+set.seed(101)
+library(knitr)
+library(ggplot2)
+library(data.table)
+library(scales)
+library(boot) # has inv.logit() function
+library(lme4)
+library(MASS)
+library(parameters)
+```
+
+# Demo or refresher on interaction terms in R
+
+This lab will give a couple examples of specifying and interpreting interaction terms in R.
+
+### Grab Ghana Bednet data
+
+```{r, echo = F}
+# Setting personal working directory
+os <-  "pc"
+
+if(os  == "mac"){
+  setwd("~/Documents/OneDrive - UW/PhD/GH Teaching Assistant/Data")
+} else {
+  setwd("C:/Users/ctroeger/OneDrive - UW/PhD/GH Teaching Assistant/Data/")
+}
+
+# Read in data
+dt <- fread("gha_bednet.csv")
+
+```
+
+Let's say we have a hypothesis that there is an interaction between age and effectiveness of bednet. First we will build a basic model and iterate on it. Let's keep it simple and not consider clustering.
+
+```{r}
+dt$row <- 1
+# make sex a factor for later
+dt[, sex := factor(sex, levels = c(0,1), labels = c("Female","Male"))]
+tab_dt <- dt[, lapply(.SD, function(x) sum(x)),
+             .SDcols = c("row","outcome","follyr"),
+             by = c("cluster","bednet","agegp","sex")]
+```
+
+My model is:
+
+$$
+Y_i \sim \beta_0 + \beta_1bednet_i + \beta_2sex_i + \beta_3agegroup_i + \epsilon_i
+$$
+
+Seems like it!
+
+```{r, warning = F, message = F}
+mod0 <- glm(outcome ~ offset(log(follyr)) + bednet + agegp + sex, data = dt, family = poisson)
+print_md(model_parameters(mod0, exponentiate = T))
+```
+
+
+Let's consider two ways to specify an interaction term between variables. [Useful link](https://conjugateprior.org/2013/01/formulae-in-r-anova/) 
+
+1. Specifying an interaction with the `colon (:)` icon will return a model with those variables *only* as interaction terms. `glm(y ~ a:b)`
+
+$$
+Y_i \sim \beta_{a,b}
+$$
+
+2. Specifying an interaction with the `asterisk (*)` icon will return a model with those variables separately and as an interaction term. `glm(y ~ a*b)`
+
+$$
+Y_i \sim \beta{a} + \beta_b + \beta_{a,b}
+$$
+
+
+
+```{r, warning = F, message = F}
+mod1 <- glm(outcome ~ offset(log(follyr)) + bednet:agegp + sex, data = dt, family = poisson)
+print_md(model_parameters(mod1, exponentiate = T))
+
+mod2 <- glm(outcome ~ offset(log(follyr)) + bednet*agegp + sex, data = dt, family = poisson)
+print_md(model_parameters(mod2, exponentiate = T))
+
+# mod2 is the same as writing
+# glm(outcome ~ offset(log(follyr)) + bednet + agegp + bednet:agegp + sex, data = dt, family = poisson)
+```
+
+Interpreting coefficients from interaction terms can be tricky.
+
+* `intercept` = incidence of malaria when `bednet = 0, agegp = 0, sex = "Female"`
+* `bednet` = decrease in risk of malaria when `bednet = 1"`
+* `agegp` = decrease in risk of malaria for each 1 unit increase in `agegp` when `bednet = 0`
+* `sexMale` = decrease in risk of malaria when `sex = "Male"`
+* `bednet:agegp` = increase in risk of malaria for each 1 unit increase in `agegp` when `bednet = 1`
+
+Note that we can add interaction terms to a mixed-effects model in exactly the same way:
+
+```{r, warning = F, message = F}
+mod3 <- glmer(outcome ~ offset(log(follyr)) + bednet*agegp + sex + (1 | cluster), data = dt, family = poisson)
+print_md(model_parameters(mod3, exponentiate = T))
+```
+
+### Compare predictions 
+
+```{r}
+
+pred_dt <- expand.grid(agegp = 0:4,
+                       sex = c("Male","Female"),
+                       bednet = c(0,1),
+                       follyr = 1)
+
+# predict model without interaction
+pred_dt$pred_oneway <- predict(mod0, newdata = pred_dt)
+# predict model with interaction
+pred_dt$pred <- predict(mod2, newdata = pred_dt)
+
+ggplot(pred_dt, aes(x = agegp, y = pred_oneway, lty = factor(sex), col = factor(bednet))) + geom_line() +
+  theme_classic() + ggtitle("One-way model", subtitle = "Log-space")
+
+ggplot(pred_dt, aes(x = agegp, y = exp(pred_oneway), lty = factor(sex), col = factor(bednet))) + geom_line() +
+  theme_classic() + ggtitle("One-way model", subtitle = "Linear-space")
+
+ggplot(pred_dt, aes(x = agegp, y = pred, lty = factor(sex), col = factor(bednet))) + geom_line() + facet_wrap(~sex) +
+  theme_classic() + ggtitle("Interaction model", subtitle = "Log-space")
+
+ggplot(pred_dt, aes(x = agegp, y = exp(pred), lty = factor(sex), col = factor(bednet))) + geom_line() +
+  theme_classic() + ggtitle("Interaction model", subtitle = "Linear-space")
+
+ggplot(pred_dt, aes(x = pred_oneway, y = pred)) + geom_point() +
+  theme_classic()
+
+```

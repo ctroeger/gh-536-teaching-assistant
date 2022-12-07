@@ -1,0 +1,478 @@
+---
+title: "Lab 3: Analysis of Cluster-level data"
+author: "Chris Troeger"
+date: "1/25/2022"
+output: html_document
+---
+
+# Contents
+## 1. Review of odds and risk ratios
+
+## 2. Code to replicate lecture on analysis of cluster-level data
+
+```{r, echo = F, warning = F, message = F}
+set.seed(101)
+library(knitr)
+library(ggplot2)
+library(data.table)
+library(scales)
+library(boot) # has inv.logit() function
+library(lme4)
+library(MASS)
+
+# Setting personal working directory
+os <-  "pc"
+
+if(os  == "mac"){
+  setwd("~/Documents/OneDrive - UW/PhD/GH Teaching Assistant/Data")
+} else {
+  setwd("C:/Users/ctroeger/OneDrive - UW/PhD/GH Teaching Assistant/Data/")
+}
+
+# Read in data
+dt <- fread("gha_bednet.csv")
+```
+
+## Review of odds and risk ratios
+
+Recall that both are measures of *relative risks*- how much does the risk of an event vary between an exposed and an unexposed population? This is often the primary outcome in a randomized controlled trial. Does the risk depend on whether or not a population (like a cluster) or an individual gets the intervention?
+
+For the example in this lab, we will be using the data from a bednet trial in Ghana. This is the same study that was assigned as reading for January 20. Bobby also used these data as the motivating example for cluster-level analyses. 
+
+There are two binary variables I will use for the first part of the lab: `outcome` (if I child died during the follow up period) and `bednet` (if the child was part of a cluster that received bednets to prevent against mosquito-borne disease). 
+
+### 2x2 Contingency Tables
+
+I like structuring my 2x2 tables in a specific way, so I am coding it that way.
+
+```{r}
+dt[, intervention := factor(bednet, levels = c(1,0),
+                            labels = c("Intervention","Control"))]
+dt[, deaths := factor(outcome, levels = c(1,0),
+                      labels = c("Dead","Alive"))]
+
+kable(data.table(col1 = c("","Exposed","Unexposed"),
+                 col2 = c("Outcome","A","C"),
+                 col3 = c("No outcome", "B", "D")),
+      col.names = NULL)
+
+my_2x2 <- table(dt$intervention, dt$deaths)
+my_2x2
+
+```
+Recall that the odds ratio for a 2x2 table is 
+
+$$
+OR = \frac{(A*D)}{(B*C)}
+$$
+
+And that a risk ratio can be estimated by:
+
+$$
+RR = \frac{\frac{A}{(A+B)}}{\frac{C}{(C+D)}}
+$$
+```{r}
+
+a <- 396
+b <- 12917
+c <- 461
+d <- 12568
+
+or <- (my_2x2[1,1] * my_2x2[2,2]) / (my_2x2[1,2] * my_2x2[2,1])
+or <- (a * d) / (b * c)
+rr <- (a / (a + b)) / (c / (c + d))
+round(or, 2)
+round(rr, 2)
+```
+
+Odds ratios and risk ratios will be similar when the prevalence of the outcome in the exposed group (A) is rare. However, as the outcome becomes more common in the exposed group, odds ratios will grow increasingly biased away from the risk ratio. Let's visualize that. We will keep everything else the same but increase the number of deaths in the group that received the intervention.
+
+```{r}
+estimate_risks_function <- function(x){
+  a <- x
+  or <- (a * d) / (b * c)
+  rr <- (a / (a + b)) / (c / (c + d))
+  return(data.table(odds = or,
+                    risk = rr))
+}
+
+estimate_risks_function(a)
+
+## Great, it works. Let's do a loop and plot the results
+my_sim <- data.table()
+for(i in 1:12917){
+  my_sim <- rbind(my_sim, 
+                  estimate_risks_function(i))
+}
+my_sim$events <- 1:12917
+my_sim$exp_prevalence <- my_sim$events / 12917
+
+ggplot(my_sim, aes(x = odds, y = risk)) + 
+  theme_classic() + 
+  geom_line(lwd = 1.05) + 
+  geom_abline(intercept = 0, slope = 1, 
+              col = "red", lwd = 1.05, lty = 2)
+
+ggplot(my_sim, aes(x = exp_prevalence)) +
+  geom_line(aes(y = odds, col = "Odds")) + 
+  geom_line(aes(y = risk, col = "Risk")) +
+  ylab("Ratio") + theme_classic() +
+  scale_color_discrete("")
+```
+
+In this example, deaths are rare, so the odds and risk ratios are very similar. Fortunately, we don't often have to calculate the ratios by hand. The **binomial** family in `glm()` can produce estimates for non-binary exposures and will give us quick access to confidence intervals. Recall that the odds ratio can be obtained by exponentiating the coefficient from a binomial model. 
+
+```{r}
+mod0 <- glm(outcome ~ bednet, data = dt, family = "binomial")
+summary(mod0)
+or_fitted <- exp(coef(mod0)[2])
+round(or_fitted, 2)
+```
+
+That's reassuring, we got the same number as before! What if we want confidence intervals from the model? Be careful here. The coefficients are normally distributed *before* we exponentiate them. An illustration.
+
+```{r}
+# Get the beta coefficient
+bednet_beta <- coef(mod0)[2]
+
+# One way to get the standard error is to index the summary table.
+mod_se <- summary(mod0)$coefficients[2,2]
+
+# I prefer extracting from the variance-covariance matrix
+mod_se <- sqrt(diag(vcov(mod0)))[2]
+
+# So, how do we get our confidence intervals? 
+# We must first add to our beta and THEN exponentiate
+mod_ci <- c(exp(bednet_beta - mod_se * 1.96),
+            exp(bednet_beta + mod_se * 1.96))
+
+print(paste0("The estimated odds ratio was ", 
+             round(exp(bednet_beta), 2), 
+             " (", paste(round(mod_ci,2), collapse = " to "),")"))
+
+```
+
+The standard error of our estimate cannot simply be exponentiated and then added to our linear odds ratio. **Do not exponentiate the standard error and add to the odds ratio!** The data were not modeled in linear space and the beta from the model is not normally distributed in linear space. Look, the lower bound can never be 0 or negative:
+
+```{r}
+silly_ci <- data.table(bednet_beta,
+                       log_se = seq(0,1,0.05))
+silly_ci[, lower := lapply(.SD, function(x) exp(bednet_beta - x * 1.96)),
+         .SDcols = "log_se"]
+silly_ci[, upper := lapply(.SD, function(x) exp(bednet_beta + x * 1.96)),
+         .SDcols = "log_se"]
+
+ggplot(silly_ci, aes(x = log_se, y = exp(bednet_beta),
+                     ymin = lower, ymax = upper)) +
+  geom_point() + geom_errorbar(width = 0) + 
+  theme_classic() + 
+  ylab("Odds ratio") +
+  xlab("Standard error (log-space)") +
+  coord_flip() + geom_hline(yintercept = 1, col = "red")
+
+
+```
+
+There are a few shortcuts, especially for nicely formatted tables in RMarkdown:
+```{r, warning = F, message = F}
+library(parameters)
+print_md(model_parameters(mod0, exponentiate = T))
+
+```
+
+### Interpreting predictions from a binomial model
+
+Predictions from a binomial regression (**after inverse logit transformation**) are the probability that event $y$ occurred given some combination of covariates:
+
+$$
+P(y_i = 1 | X_i)
+$$
+
+Where $X_i$ is a combination of covariate values (in this example, it is simply bednets). 
+
+Looking again at our formatted table
+
+```{r, warning = F, message = F}
+print_md(model_parameters(mod0, exponentiate = T))
+```
+
+How do we interpret the Intercept? This is the baseline probability of mortality in this study among children who did not receive the intervention. We can confirm:
+
+```{r}
+mean(dt[bednet == 0]$outcome)
+inv.logit(coef(mod0)[1])
+```
+
+Fantastic! So, we can pretty easily estimate the probability of mortality for children in this study who did receive the intervention by adding the coefficient for bednets to the intercept (in logit space) and then transforming to linear space:
+
+```{r}
+inv.logit(sum(coef(mod0)))
+```
+
+This is the probability of mortality for children who received bednets! Amazing!
+
+```{r}
+mean(dt[bednet == 1]$outcome)
+```
+
+Now let's add some uncertainty to our predictions. 
+
+```{r, echo = F, eval = F}
+# The first method is using the `predict(se.fit = T)` option. 
+my_prediction <- predict(mod0, newdata = data.table(bednet = c(0,1)), 
+        type = "link", se.fit = T)
+my_prediction
+
+probs <- inv.logit(my_prediction$fit)
+lwr <- inv.logit(my_prediction$fit - 1.96 * my_prediction$se.fit)
+upr <- inv.logit(my_prediction$fit + 1.96 * my_prediction$se.fit)
+
+kable(data.table(x1 = c("Control","Intervention"), probs, lwr, upr),
+      col.names = c("","Probability","Lower","Upper"),
+      digits = 3,
+      caption = "Probability of mortality (95% Confidence Intervals)")
+```
+
+My preferred approach is using a *bootstrap* method. This means simulating from a distribution. Be mindful of the distribution of the response (linear, logit, log, poisson). In this case, we can simulate logit-normal, find the quantiles, and then inverse logit:
+
+```{r}
+# One way to get the standard error is to index the summary table.
+mod_se <- summary(mod0)$coefficients[,2]
+
+sims_intercept <- rnorm(10000, mean = coef(mod0)[1], sd = mod_se[1])
+sims_intervention  <- rnorm(10000, mean = coef(mod0)[2], sd = mod_se[2])
+
+# We need to combine the intercept and the intervention sims
+sims_intervention <- sims_intercept + sims_intervention
+
+sim_means <- c(mean(sims_intercept), mean(sims_intervention))
+sim_upper <- c(quantile(sims_intercept, 0.025), quantile(sims_intervention, 0.025))
+sim_lower <- c(quantile(sims_intercept, 0.975), quantile(sims_intervention, 0.975))
+```
+
+# Replicate some of the things shown in lecture
+
+In lecture this week, Bobby is showing how to analyze cluster-level outcomes. He is using the same dataset, a cluster randomized trial of bednets in Ghana evaluating the risk of all-cause mortality. 
+
+Let's start with a crude comparison of the number of deaths by cluster.  There are 26,342 children (each row is a child) from 96 clusters. We also have information on the agegroup (`agegp`), sex (`sex`), and follow-up time in years (`follyr`) for each child. 
+
+```{r}
+head(dt)
+```
+
+To do cluster level analyses, we will aggregate the outcomes to the cluster level. I am finding two main things:
+
+* Average values of `agemn`, `follyr`, `agegp`, and `sex`  
+
+* Sum of `outcome` and `follyr`
+
+By `cluster` and by `bednet`. Although there are several ways to do this, I am merging the averages and the sums. 
+
+```{r, warning = F}
+## Summary by cluster
+# The average of a binary variable is a proportion
+cluster <- dt[, lapply(.SD, function(x) mean(x)),
+                    by = c("cluster","bednet"),
+                    .SDcols = c("outcome","agemn","follyr","sex")]
+
+## Finding the mortality rate can be completed in two equivalent ways.
+# You can find the average outcome / average follow up time
+cluster[, mort_rate := outcome / follyr * 1000]
+# Or you can sum up events an follow up time and divide by cluster
+dt[, subject := 1]
+cluster_inc <- dt[, lapply(.SD, function(x) sum(x)),
+                  by = c("cluster"),
+                  .SDcols = c("outcome","follyr","subject")]
+cluster_inc[, mort_rate := outcome / follyr * 1000]
+
+## Regardless of our approach, let's merge to get sums and averages
+# we must have count outcome for poisson
+setnames(cluster_inc, c("outcome","follyr","subject"),
+         c("cumulative_outcome","cumulative_follyr","n_children"))
+cluster <- merge(cluster, cluster_inc[,c("cluster","cumulative_outcome","cumulative_follyr","n_children")],
+                 by = "cluster")
+
+ggplot(cluster, aes(x = factor(bednet), y = mort_rate, col = factor(bednet))) +
+  geom_boxplot() + geom_point(alpha = 0.3) + 
+  theme_classic() + 
+  scale_x_discrete("", labels = c("Control","Intervention")) +
+  scale_y_continuous("Cumulative mortality per 1000 person-years", breaks = seq(0,70,10)) +
+  guides(col = "none") 
+
+cluster_mean <- cluster[, lapply(.SD, function(x) mean(x)),
+                        by = "bednet",
+                        .SDcols = "mort_rate"]
+cluster_sd <- cluster[, lapply(.SD, function(x) sd(x)),
+                      by = "bednet",
+                      .SDcols = "mort_rate"]
+
+kable(data.table(Group = c("Intervention","Control"),
+                 Mean = cluster_mean$mort_rate,
+                 StdDev = cluster_sd$mort_rate),
+      digits = 2)
+```
+
+Different view of the distributions. 
+
+```{r, warning = F, message = F}
+ggplot(cluster, aes(x = mort_rate, fill = factor(bednet))) + 
+  geom_density(alpha = 0.6) + 
+  theme_classic() + 
+  xlab("Mortality rate per 1000 person-years") +
+  scale_fill_discrete("", labels = c("Control","Intervention"))
+```
+
+Oh wait, our vales (rates) can't be negative. Let's see how the distribution looks in log space:
+
+```{r, warning = F, message = F}
+cluster$log_rate <- log(cluster$mort_rate)
+ggplot(cluster, aes(x = log_rate, fill = factor(bednet))) + 
+  geom_density(alpha = 0.6) + 
+  theme_classic() + 
+  xlab("Log-Mortality rate per 1000 person-years") +
+  scale_fill_discrete("", labels = c("Control","Intervention"))
+
+```
+
+Maybe we want to visualize our binary response by cluster. Instead of this:
+
+```{r, warning = F, message = F}
+ggplot(dt, aes(x = cluster, y = outcome)) + geom_point() +
+  theme_classic()
+```
+
+Consider using the aggregates. The mean of a binary variable is the proportion!
+
+```{r}
+ggplot(cluster, aes(x = cluster, y = outcome)) + 
+  geom_point() + theme_classic()
+```
+
+### Unweighted comparison of means  
+
+The first thing that Bobby showed was a simple T-test for mean mortality rate by cluster:
+
+
+```{r}
+t.test(cluster[bednet == 0]$mort_rate, cluster[bednet == 1]$mort_rate)
+```
+
+### Unweighted comparison of log-means
+
+Given the distribution might not be linear (rates can't be negative), perhaps a better t-test would be comparing log-rate-means:
+```{r}
+t.test(cluster[bednet == 0 & log_rate != "-Inf"]$log_rate, cluster[bednet == 1]$log_rate)
+```
+
+### Weighted comparison (person-years)  
+Next, Bobby showed how to run a Poisson model (but this ignores cluster variation). *NOTE: this is technically a cluster-level analysis because I am using the aggregate cluster-level data. How could you run a nearly identical model on the individual level?*
+
+```{r}
+mod1 <- glm(cumulative_outcome ~ offset(log(cumulative_follyr)) + bednet, data = cluster, family = poisson)
+summary(mod1)
+```
+
+You didn't need to be held in suspense long! Let's run an individual-level model:
+
+```{r}
+mod2 <- glm(outcome ~ offset(log(follyr)) + bednet, data = dt, family = poisson)
+summary(mod2)
+```
+
+### Account for individual-level variation between clusters   
+The last method to analyze cluster-level results from lecture was to estimate an *expected* number of deaths by cluster based on the distribution of individuals within that cluster. Think about this: If there is variation in the risk of mortality based on child age and/or sex, then the risk of mortality in a cluster with older children might be different from one with younger children, independent from the bednet intervention. Let's look at the data a couple ways. 
+
+First, mortality by age. **Mortality rate is lower in clusters with older average ages**
+
+```{r, warning = F, message = F}
+cluster[, cluster_order := factor(cluster)]
+cluster[, cluster_order := reorder(cluster_order, agemn)]
+ggplot(cluster, aes(x = agemn, y = mort_rate)) + 
+  geom_point(aes(col = factor(bednet), size = n_children), alpha = 0.6) + 
+  stat_smooth(method = "lm", se = F, col = "black") +
+  guides(size = "none") + 
+  theme_classic() + 
+  ylab("Mortality rate per 1000 person-years") +
+  xlab("Average age in months") + 
+  scale_color_discrete("", labels = c("Control","Intervention"))
+```
+
+**Mortality is also lower in older age groups, regardless of the intervention**
+
+```{r}
+mort_age <- dt[, lapply(.SD, function(x) sum(x)),
+               by = c("agegp","bednet"),
+               .SDcols = c("subject","follyr","outcome")]
+
+ggplot(mort_age, aes(x = agegp, y = outcome / follyr * 1000, fill = factor(bednet))) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.9)) +
+  ylab("Mortality rate per 1000") +
+  theme_classic() + scale_fill_discrete("", labels = c("Control","Intervention"))
+
+```
+
+Our concern is that some clusters have older children, on average, than others.
+
+```{r}
+t.test(cluster[bednet == 0]$agemn, cluster[bednet == 1]$agemn)
+
+ggplot(cluster, aes(x = factor(bednet), y = agemn, col = factor(bednet))) +
+  geom_boxplot() + geom_point(alpha = 0.5) +
+  theme_classic()
+```
+This is potentially a problem! On average, clusters that received the intervention are younger than clusters that did not. 
+
+So next, the idea is to fit an individual-level poisson regression to predict the risk of mortality based on age and sex. 
+```{r}
+mod <- glm(outcome ~ factor(agegp) + factor(sex) + offset(log(follyr)), data = dt, 
+           family = "poisson")
+summary(mod)
+
+dt$pois_pred <- exp(predict(mod, newdata = dt))
+```
+
+Next, we aggregate back to the cluster level and calculate the residual between how many deaths we observed compared to how many deaths would be expected based on the distribution of individual children's ages in each cluster. We then run another t-test.
+
+```{r}
+## aggregate
+pois_agg <- dt[, lapply(.SD, function(x) sum(x)),
+               .SDcols = c("outcome","pois_pred", "follyr"),
+               by = c("cluster","bednet")]
+pois_agg$residual <- (pois_agg$outcome - pois_agg$pois_pred) / pois_agg$follyr
+
+t.test(pois_agg[bednet == 0]$residual, pois_agg[bednet == 1]$residual)
+
+cluster_mean <- pois_agg[, lapply(.SD, function(x) mean(x)),
+                        by = "bednet",
+                        .SDcols = "residual"]
+cluster_sd <- pois_agg[, lapply(.SD, function(x) sd(x)),
+                      by = "bednet",
+                      .SDcols = "residual"]
+
+kable(data.table(Group = c("Intervention","Control"),
+                 Mean = cluster_mean$residual*1000,
+                 StdDev = cluster_sd$residual*1000),
+      digits = 2)
+```
+
+We can also visualize this in several ways. 
+
+```{r}
+ggplot(pois_agg, aes(x = outcome, y = pois_pred, col = factor(bednet))) +
+  geom_point(alpha = 0.6, size = 3) + 
+  scale_x_continuous("Deaths") +
+  scale_y_continuous("Predicted") +
+  scale_color_discrete("", labels = c("Control","Intervention")) +
+  theme_classic() +
+  geom_density_2d(lwd = 1.05)
+
+ggplot(pois_agg, aes(x = residual, fill = factor(bednet))) + 
+  geom_density(alpha = 0.6) + 
+  theme_classic() + 
+  geom_vline(xintercept = 0, lty = 2) + 
+  xlab("Residual from predictions") +
+  scale_fill_discrete("", labels = c("Control","Intervention"))
+```
+
+
+### On average, mortality rate in control clusters is higher than expected based on individual characteristics in those clusters (age and sex).

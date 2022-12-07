@@ -1,0 +1,299 @@
+---
+title: "Homework 2 solution key"
+author: Adrien Allorant
+date: February 4, 2021
+output:
+  pdf_document:
+    fig_width: 7
+    fig_height: 6
+    fig_caption: true
+    df_print: kable
+    latex_engine: xelatex
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r libs and inputs, echo = FALSE, message=FALSE}
+# clear workspace and load libraries
+rm(list=ls())
+
+# load packages
+libs <- c("data.table", "nnet", "ggplot2", "dplyr", "plyr", 'knitr','xtable','tidyr')
+for(l in libs){
+  if(!require(l,character.only = TRUE, quietly = TRUE)){
+    message( sprintf('Did not have the required package << %s >> installed. Downloading now ... ',l))
+    install.packages(l) 
+  }
+  library(l, character.only = TRUE, quietly = TRUE)
+}
+# Setting personal working directory
+os <-  "pc"
+
+if(os  == "mac"){
+  setwd("~/Documents/OneDrive - UW/PhD/GH Teaching Assistant/Data")
+} else {
+  setwd("C:/Users/ctroeger/OneDrive - UW/PhD/GH Teaching Assistant/Data/")
+}
+
+# Read in data
+nutrimalDF <- read.csv("Nutrimal_supp.csv")
+
+# # set data directory
+# data.dir <- "C:/Users/allorant/OneDrive - UW/Shared with Everyone/UW/2nd Year/Winter/GH536/Homeworks/Hwk2/"
+# 
+# # load data
+# nutrimalDF <- read.csv(paste0(data.dir,"/Nutrimal_supp.csv"), header = T, sep = ",")
+
+```
+
+## Question 1 - Logistic and Log binomial models
+
+**Question 1.1	What type of regression model was used to estimate the effect of malaria on nutritional status? **
+
+1.	A *logistic regression* with each nutritional status indicator (adequate/inadequate status) at the end of follow-up as the outcome
+2.	A *linear regression* of the change in the Z-score of each nutritional status indicator
+
+**List the independent variables and how they were coded to create the results in Table 3**
+
+*	Gender (male/female)
+*	Maternal education (From Table 1: illiterate, basic education, higher education.  Unknown if these categories were used in the regressions)
+*	Socioeconomic status (low, middle high)
+*	Presented malaria (yes/no)
+*	Number of malaria episodes (0, 1, 2, >=3)
+*	Time from last malaria to second assessment (no malaria, 6-12 months, 3-6 months, 45-90 days, <=45 days)   (again, unclear if bounds are really inclusive or not)
+
+**What variables from the study dataset were used as outcomes?**  
+
+1. *Logistic regression*
+
+*	WAZ1_aval (except for 10-14 age group) = weight for age Z-score<-2 at follow-up 
+    *	1=Z-score<-2 (adequate weight-for-age), 0=Z-score>=-2 (inadequate weight-for-age)
+*	HAZ1_aval = height for age Z-score<-2 at follow-up
+    * 1=Z-score<-2 (adequate weight-for-age), 0=Z-score>=-2 (inadequate weight-for-age)
+* BAZ1_aval = body mass index for age Z-score<-2 at follow-up
+    * 1=Z-score<-2 (adequate weight-for-age), 0=Z-score>=-2 (inadequate weight-for-age)
+*	diagvelocidadecres = Inadequate linear growth velocity = difference between initial and final height in 12 months, cm/year.  Adequate/inadequate growth defined by WHO standards for each age group
+    *	1=adequate growth velocity, 0=inadequate growth velocity
+*	WHZ variable missing from dataset? (except for 10-14 age group) = weight for height Z-score<-2 at follow-up
+    *	The binary variable of this Z-score is not included in the dataset or results text/tables, but the methods state that WHZ is included as an outcome, coded similarly to the other nutritional outcomes
+
+2. *Linear regression*
+
+*	WAZdif (except for 10-14 age group) = change in weight for age Z-score
+*	HAZdif = change in height for age Z-score
+*	WHZdif (except for 10-14 age group) = change in weight for height Z-score
+*	BAZdif = change in body mass index for age Z-score
+
+
+**1.2 Estimate the risk of anemia at study exit (outcome: anemia_saida) among children who experienced a malaria infection at any time during the study (primary exposure of interest, malariasn1).**
+
+
+```{r 1.2, echo=FALSE, message = FALSE}
+
+table(nutrimalDF$anemia_saida, nutrimalDF$malariasn1)
+
+```
+
+Risk of anemia at study exit = $33/81 = .407$
+
+**1.3 How many children had anemia at study exit? How many were exposed to malaria infection during the study (defined by malariasn1)?**
+
+
+```{r 1.3 tableone, echo = FALSE, message=FALSE}
+table(nutrimalDF$anemia_saida)
+table(nutrimalDF$malariasn1)
+```
+
+Children with anemia at study exit = 66 (20 missing values)
+Children with malaria during the study = 85
+
+**1.4 Calculate the crude Risk Ratio for the association between malaria infection (malariasn1) and anemia (anemia_saida) and 95% CI by hand using a 2x2 table**
+
+As a reminder, if you have a binary outcome and a binary exposure, the relative risk ($RR$) can be estimated using the following 2*2 table as $RR = \frac{a/(a+b)}{c/(c+d)}$ and a $95\%$ confidence interval can be derived using the fact that the logarithm of the relative risk is approximately normally distributed; $ln(\widehat{RR}) \pm z_{1-\frac{\alpha}{2}} \sqrt{\frac{b/a}{a+b}+\frac{d/c}{c+d}}$
+
+|       | Outcome | No outcome     |
+| :---        |    :----:   |          ---: |
+| Exposure     | a       | b   |
+| No exposure  | c        |d     |
+
+```{r 1.4, echo = FALSE, message = FALSE}
+table(nutrimalDF$malariasn1, nutrimalDF$anemia_saida)
+a <- 33
+b <- 48
+c <- 33
+d <- 68
+
+RR <- (a/(a+b))/(c/(c+d))
+
+
+## confidence interval
+lower <- exp(log(RR) - 1.96*sqrt((b/a)/(a+b)+(d/c)/(c+d)))
+upper <- exp(log(RR) + 1.96*sqrt((b/a)/(a+b)+(d/c)/(c+d)))
+c(RR,lower,upper)
+tibble(
+    `Relative Risk` = round(RR,2),
+    `2.5%` = round(lower,2),
+    `97.5%` = round(upper,2)) %>%
+    kable(caption="RR and 95%CI")
+```
+
+**1.5 Estimate the crude risk ratio AND odds ratio and 95% CI for the association between any malaria infection (malariasn1) and anemia at study exit (anemia_saida) in R using glm()**
+
+```{r 1.5, echo = FALSE, message = FALSE}
+nutrimalDF <- nutrimalDF %>% mutate(anemia_saida.bin =case_when(anemia_saida=="nao"~0,
+                                                                  anemia_saida=="sim"~1),
+                                          malariasn1.bin =case_when(malariasn1=="nao"~0,
+                                                                    malariasn1=="sim"~1))
+model <- anemia_saida.bin ~ malariasn1.bin
+
+list <- list("logit","log")
+bind_rows(lapply(list, function(l){
+  subModel <- glm(model, data=nutrimalDF, family=binomial(link=l))
+tibble(
+      Indicator = ifelse(l == "logit", "OR", "RR"),
+      `Mean`=exp(coefficients(subModel)[2]),
+      `2.5%`=exp(confint(subModel)[2,1]),
+      `97.5%`=exp(confint(subModel)[2,2]))})) %>%
+ kable(caption = "OR and RR and 95%CI") 
+```
+**1.6 Estimate an adjusted risk ratio AND odds ratio and 95% CI (for all variables) including these covariates as potential confounders: anemia_entrada (y/n); sexo (males as reference); socioeconomico (rich/middle/poor)**
+
+```{r 1.6, echo = FALSE, message = FALSE}
+
+nutrimalDF <- nutrimalDF %>% 
+  mutate(anemia_entrada.bin =case_when(anemia_entrada=="nao"~0,anemia_entrada=="sim"~1),
+         sexo.bin =case_when(sexo=="masculino"~0,sexo=="feminino"~1),
+         socioeconomico.bin =factor(socioeconomico,levels=c("poor", "middle", "rich")))
+
+model.2 <- anemia_saida.bin ~ malariasn1.bin + anemia_entrada.bin + sexo.bin + socioeconomico.bin
+
+list <- list("logit","log")
+bind_rows(lapply(list, function(l){
+  subModel <- glm(model.2, data=nutrimalDF, family=binomial(link=l))
+tibble(
+      Method = ifelse(l == "logit", "OR", "RR"),
+      Indicator = row.names(confint(subModel)),
+      `Mean`=exp(coefficients(subModel)),
+      `2.5%`=exp(confint(subModel)[,1]),
+      `97.5%`=exp(confint(subModel)[,2]))})) %>%
+ kable(caption = "OR and RR models")
+
+```
+
+**Did the effect estimate for malaria change much between your crude and adjusted model?**
+The effect estimate for *malariasn1* remained similar between the crude and adjusted models, differing by 0.009 for OR and by 0.076 for RR, not significant before or after adjustment.
+
+**How different are your adjusted risk ratio and adjusted odds ratio estimates? Is one more precise than the other?** 
+For both crude and adjusted estimates, the RR estimates are more precise than OR for all covariates.  
+
+**What variables were statistically significant in your adjusted logistic model?**
+Only *anemia_entrada* was statistically significant in the adjusted logistic model (p=0.015).
+
+
+## Question 2 - Use Poisson regression to estimate the incidence of first malaria infection
+
+**2.1  The time_to_first_malaria variable has the number of days (365 days=no malaria).  First create a tabular dataset to transform our individual-level dataset to reflect the count of malaria cases and cumulative exposure time to first malaria by variables of interest. In this example, we will explore sexo, socioeconomico and helmintosentrada status as covariates. (assume helmintosentrada = 2 should be coded as “no”).**
+
+```{r 2.1, echo = FALSE, message = FALSE}
+
+# Create the tabular dataset
+tabularDF <- nutrimalDF %>% 
+  mutate(helmintosentrada.bin =case_when(helmintosentrada=="2"~0,helmintosentrada=="sim"~1)) %>%
+  data.table() # to exmplify the use of data.table
+
+tabularDF <- tabularDF[, list(malaria_cases = sum(malariasn1.bin),
+                              cumulative_exposure = sum(time_to_first_malaria)), by = 'sexo,socioeconomico,helmintosentrada.bin']
+
+```
+
+**2.2 Calculate by hand a crude incidence rate of first malaria infection for the total study population (use malariasn1 to define malaria outcomes. Report rate as number of cases per person-day.**
+
+```{r 2.2, echo = F, message=F}
+
+sum(tabularDF$malaria_cases)/sum(tabularDF$cumulative_exposure)*1000
+  
+```
+
+The crude IR is 1.43 new infections per 1000 person-days (or 0.00143 new infections/person-day, or 0.522 new infections/person-year)
+
+**2.3 Use glm() to fit a Poisson regression to estimate the incidence rate. This model would have no predictors. What is the incidence rate? **
+
+
+```{r 2.3, echo = FALSE, message = FALSE}
+
+model.pois <-  malaria_cases ~ offset(log(cumulative_exposure))
+
+ModelP <- glm(model.pois, data=tabularDF, family=poisson)
+tibble(
+      `IR`=exp(coefficients(ModelP)),
+      `2.5%`=exp(confint(ModelP)[1]),
+      `97.5%`=exp(confint(ModelP)[2])) %>%
+ kable(caption = "Poisson regression for IR")
+
+```
+The IR is 0.00143 new infections/person-day  (95% CI 0.00114-0.00175)
+
+**2.4 Add the covariates sexo,  helmintosentrada and socioeconomico to the model as predictors. Report these as incidence rate ratios with their confidence intervals. Are any of these IRRs statistically significant?**
+
+```{r 2.4, echo = FALSE, message = FALSE}
+
+tabularDF <- tabularDF %>% 
+  mutate(sexo.bin =case_when(sexo=="masculino"~0,sexo=="feminino"~1),
+         socioeconomico.bin =factor(socioeconomico,levels=c("poor", "middle", "rich")))
+
+model.pois2 <-  malaria_cases ~ offset(log(cumulative_exposure)) + sexo.bin + socioeconomico.bin + helmintosentrada.bin
+
+ModelP2 <- glm(model.pois2, data=tabularDF, family=poisson)
+
+exp(confint(ModelP2)) %>%
+            as.data.frame %>%
+            mutate(IRR=exp(coefficients(ModelP2)),
+                  Coefficient=row.names(.)) %>%
+            as_tibble %>%
+ kable(caption = "Poisson regression with covariates")
+
+
+```
+
+None of these IRRs are statistically significant (i.e. all their 95%CI include 1)
+
+
+**2.5 Explore what happens when the length of person-time contributed is shortened (differential with respect to a given variable). Reduce the total person time among all subjects for which helmnitosentrada=yes by 30%.**
+
+```{r 2.5, echo = FALSE, message = FALSE}
+
+tabularDF <- tabularDF %>% 
+  mutate(cumulative_exposure_reduced = ifelse(helmintosentrada.bin == 1,cumulative_exposure*.7,cumulative_exposure))
+
+model.pois3 <-  malaria_cases ~ offset(log(cumulative_exposure_reduced)) + sexo.bin + helmintosentrada.bin
+
+ModelP3 <- glm(model.pois3, data=tabularDF, family=poisson)
+
+exp(confint(ModelP3)) %>%
+            as.data.frame %>%
+            mutate(IRR=exp(coefficients(ModelP3)),
+                  Coefficient=row.names(.)) %>%
+            as_tibble %>%
+ kable(caption = "Poisson regression with covariates and reduced cumulative exposure by 30%")
+
+
+```
+
+**What is the new IRR for helmintosentrada (include sexo in the model as another covariate)?**
+
+
+The new IRR for *helmintosentrada* is $2.250 (95\%CI [1.380-3.721])$ - statistically different from 1.
+
+**How did it change and is this what you expected?  Please provide a rationale for why this IRR changed in the direction you observed.** 
+
+The IRR increased by $0.67$ and is now statistically significant.
+Given that:
+$$
+\begin{aligned}
+IRR_{\text{helmintosentrada}}&=\frac{\text{incidence rate among exposed (helmintosentrada==1)}}{\text{incidence rate among unexposed (helmintosentrada==0)}}\\ \Bigg(&= \frac{\frac{\text{cases among exposed (helmintosentrada==1)}}{\text{cumulative exposure among exposed (helmintosentrada==1)}}}{\frac{\text{cases among unexposed (helmintosentrada==0)}}{\text{cumulative exposure among unexposed (helmintosentrada==0)}}}\Bigg)
+\end{aligned}
+$$
+When we decreased the exposure time until first infection by 30% among only those for whom $\text{helmintosentrada==1}$, we decreased the denominator of the incidence rate for that subset of the study population. This increased the numerator of the IRR equation above (while keeping the denominator constant), and so we expected the IRR to increase.
+

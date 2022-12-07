@@ -1,0 +1,282 @@
+---
+title: 'Hierarchical Model Demo: Sleep Study'
+author: "Chris Troeger"
+date: "January 3, 2022"
+output: html_document
+---
+
+# This script is intended to demonstrate how to use and interpret a hierarchical linear model in R
+
+Hierarchical models are models that incorporate grouping, clustering, or repeated measurements from a dataset into a statistical regression model. Other names for this model structure are:
+
+* Mixed-effects models
+* Random-effects (random intercepts; random slopes)
+* Multi-level models
+
+There are two main packages to run hierarchical (mixed-effects) models in R.  
+
+* $lme4$
+* $nlme$
+
+I prefer using lme4 so that is what I will use in this script. I am also using  
+
+* $ggplot2$ (graphing)
+* $data.table$ (my prefered environment for data management)
+
+The data we will use is in the **lme4** package. These data are called "sleepstudy" and represent 18 individuals in a sleep deprivation study where reaction time is measured per day of deprivation. You can learn more about it by typing $help(sleepstudy)$ in your R console (after $library(lme4)$). 
+
+## Load packages and data
+
+```{r, warning = F, message = F}
+##########################################
+## Simple demonstration of hierarchical
+## models
+##########################################
+library(data.table)
+library(lme4)
+library(nlme)
+library(ggplot2)
+
+## Use "sleepstudy" to illustrate
+# ?sleepstudy : # Reaction times in a sleep deprivation study
+
+dt <- data.table(sleepstudy)
+```
+
+## Data investigation
+
+Let's investigate the dataset and get a sense of it. How did I know there are 18 Subjects in the study?
+
+```{r}
+dt
+
+summary(dt)
+
+```
+
+One of the first things to do with a dataset is to plot it. 
+
+```{r}
+
+ggplot(dt, aes(x = Days, y = Reaction)) + geom_point() + theme_bw() +
+  scale_x_continuous(breaks = 0:9)
+
+```
+
+## Linear Model
+
+So it seems that with each day of sleep deprivation, reaction time increases. Let's quantify by how much using a simple linear model. How do we interpret the results of the model? 
+
+```{r, message = F}
+# This should look familiar, it is how we specify a linear regression
+# where Reaction is the outcome and Days the predictor
+my_lm <- lm(Reaction ~ Days, data = dt)
+summary(my_lm) # Reaction time increases by 10 milliseconds per day
+
+# The predict function produces regression fit estimates for each
+# row in the original dataset
+dt$linear_pred <- predict(my_lm)
+
+ggplot(dt, aes(x = Days, y = Reaction)) + geom_point() + theme_bw() +
+  scale_x_continuous(breaks = 0:9) + 
+  geom_line(aes(y = linear_pred), col = "purple") 
+```
+
+## Illustration of hierarchical data
+
+From our knowledge of these data, we know that they are not independent. This is because each Subject contributes 10 days of reaction time data. We would expect that some people have some unmeasured characteristic that makes them faster or slower at reacting at baseline. Let's plot this in a few ways. 
+
+**First, let's see the distribution of reaction times within and between individuals**
+
+```{r}
+# the random intercept reflects variation by individual
+# These pieces of code are simply to plot the 
+# subjects by increasing order of mean reaction time
+dt[, subject_order := factor(Subject)]
+dt[, subject_order := reorder(subject_order, Reaction, mean)]
+
+ggplot(dt, aes(x = subject_order, y = Reaction)) + geom_boxplot() + theme_bw() +
+  xlab("Subject Number")
+```
+
+Subject 309 consistently has the fastest reaction times while Subject 337 the slowest. 
+
+
+```{r, eval = F, echo = F}
+# We can look at the histogram (remember that random effects assume a normal distribution
+# of coefficients of mean mu and sd sigma^2)
+
+reaction_means <- dt[, lapply(.SD, function(x) mean(x)),
+                     .SDcols = "Reaction",
+                     by = "Subject"]
+
+ggplot(reaction_means, aes(x = Reaction)) + 
+  geom_histogram(binwidth = 50, col = "black", fill = "gray") + 
+  theme_bw() + scale_y_continuous("Subjects", breaks = 0:12)
+```
+
+**Now, let's make the same scatterplot but with lines showing the trends for each Subject** 
+
+We can see that at Day 0 (intercept), there is a range from 200 to about 325 between Subjects. There also seems to be a general increasing trend, but some Subjects have different slopes. 
+
+```{r, message = F}
+# Let's replot, considering individuals
+ggplot(dt, aes(x = Days, y = Reaction)) + geom_point(alpha = 0.5) + theme_bw() +
+  scale_x_continuous(breaks = 0:9) + 
+  stat_smooth(aes(group = Subject), method = "lm", # stat_smooth is a quick way to plot linear fit
+                       se = F, col = "black")
+```
+
+**Lastly, let's plot our linear (OLS) prediction, separate by Subject**
+
+```{r}
+# Add a panel
+ggplot(dt, aes(x = Days, y = Reaction)) + geom_point() + theme_bw() +
+  scale_x_continuous(breaks = 0:9) + 
+  geom_line(aes(y = linear_pred), col = "purple") +
+  facet_wrap(~Subject) # This will create a panel for Subjects
+```
+
+Our model isn't too bad for most Subjects, but there is variation in its fit. Let's see if we can improve it (and our uncertainty) by considering the data structure. 
+
+## Now, we will run our hierarchical model
+
+The key idea of a hierarchical model is that the data are grouped or structured in some way. Take these data for example, there are multiple observations for each Subject. To correctly account for this variation in the estimates of our effect sizes and standard errors, we should include this information in the model. Often, these models are written
+
+$$
+y_i \sim \beta_0 + \alpha_{0,j} + \beta_1Days_i + \epsilon_i
+$$
+Where $\beta_0$ is the overall intercept, $\beta_1$ is the coefficient for the slope in reaction time for $Day_i$, $\epsilon_i$ is the error term, and $\alpha_{0,j}$ is the random intercept (Day 0) for Subject $j$. 
+
+We will cover this in more detail in the lecture, but for now let's see how to implement it in R. 
+
+**This model is a random intercept model. We will allow the value of Reaction $y_i$ to vary by Subject $j$ when Days = 0.** 
+
+In the lme4 package, we will use the function $lmer$ to run a hierarchical model. We specify random intercepts like this:
+
+```{r}
+# lmer functions the same as lm. The difference is that we 
+# *must* specify a random effect, the (1 | X) part of the code
+my_lmer <- lmer(Reaction ~ Days + (1 | Subject), data = dt)
+#my_lmer <- lmer(Reaction ~ Days, data = dt) # Not run, will produce an error
+summary(my_lmer)
+```
+
+Now we will plot those predictions, compared against the simple OLS model. 
+
+```{r}
+# Predict from a "merMod" (the object created by lmer) works
+# exactly the same as for predict.lm
+dt$ran_int_pred <- predict(my_lmer)
+
+ggplot(dt, aes(x = Days, y = Reaction)) + geom_point() + theme_bw() +
+  scale_x_continuous(breaks = 0:9) + facet_wrap(~Subject) + 
+  geom_line(aes(y = linear_pred), col = "purple") + 
+  geom_line(aes(y = ran_int_pred), col = "blue")
+
+my_subjects <- c(309, 335, 337, 330)
+ggplot(dt[Subject %in% my_subjects], aes(x = Days, y = Reaction)) + 
+  geom_point(aes(col = Subject), size = 3, alpha = 0.5) + theme_bw() +
+  scale_x_continuous(breaks = 0:9) +
+  geom_line(aes(y = linear_pred), col = "black") + 
+  geom_line(aes(y = ran_int_pred, col = Subject))
+```
+
+Another common task is to extract the coefficients from this model. Here is how we extract and plot the random intercepts.
+
+```{r}
+fix_ef <- fixef(my_lmer) # Fixed-effects (grand Intercept and Days)
+ran_ef <- ranef(my_lmer) # Is a list object
+# Let's convert that into a data table instead of a list
+ran_ef <- as.data.table(ran_ef) # Also works with as.data.frame()
+
+# This has column names that are non-intuitive to me
+# condval is the conditional value (difference from overall intercept)
+# condsd is the conditional standard deviation (why is it the same for all Subjects?)
+setnames(ran_ef, c("grp","condval"),
+         c("Subject","random_intercept"))
+
+# Plot the values of the random intercepts (should be centered at 0)
+ggplot(ran_ef, aes(x = random_intercept)) + 
+  geom_histogram(binwidth = 20, fill = "gray", col = "black") + 
+  theme_bw()
+
+# Not exactly, but the mean should be 0
+mean(ran_ef$random_intercept)
+
+```
+
+Remember that the actual intercept for each Subject is the overall intercept shifted by the Subject's random intercept value.
+
+```{r}
+ran_ef$fixed_intercept <- fix_ef[1]
+ran_ef[, subject_intercept := fixed_intercept + random_intercept]
+```
+
+The other package for hierarchical models that is commonly used, $nlme$ has some nice features that may be useful later in the class. For now though, let's just see how to run a model with that package.
+
+```{r}
+# Syntax is slightly different, specify random effects outside of the formula, still use a |
+my_nlme <- lme(Reaction ~ Days, random = ~ 1 | Subject, data = dt)
+summary(my_nlme)
+```
+
+**We can also allow the model to estimate a different slope by Subject. This model is structured like**
+
+$$
+y_i \sim \beta_0 + \alpha_{0,j} + \beta_1Days_i + \gamma_{1,j}Days_i + \epsilon_i
+$$
+
+**where $\gamma_{1,j}$ is the slope on Days for Subject $j$.**  
+
+```{r}
+# Adding a random slope is done by specifying a variable on the
+# left side of the | shape. This means the model will produce
+# an estimated slope for each Subject
+my_rslope <- lmer(Reaction ~ Days + (Days | Subject), data = dt)
+summary(my_rslope)
+
+# And in nlme package:
+# my_lme_slope <- lme(Reaction ~ Days, random = ~ Days | Subject, data = dt)
+```
+
+Finally we will plot our predictions.
+
+```{r}
+dt$ran_ef_pred <- predict(my_rslope)
+
+ggplot(dt, aes(x = Days, y = Reaction)) + geom_point() + theme_bw() +
+  scale_x_continuous(breaks = 0:9) + facet_wrap(~Subject) + 
+  geom_line(aes(y = linear_pred), col = "purple") + 
+  geom_line(aes(y = ran_int_pred), col = "blue") +
+  geom_line(aes(y = ran_ef_pred), col = "red")
+
+ggplot(dt[Subject %in% my_subjects], aes(x = Days, y = Reaction)) + 
+  geom_point(aes(col = Subject), size = 3, alpha = 0.5) + theme_bw() +
+  scale_x_continuous(breaks = 0:9) +
+  geom_line(aes(y = linear_pred), col = "black") + 
+  geom_line(aes(y = ran_ef_pred, col = Subject))
+```
+
+## Model comparisons 
+
+How do we know which model is "best"? What are some of the model outputs compared to each other?
+
+```{r}
+# These are functions to produce estimates of model fit
+# You should be familiar with AIC and BIC, but essentially
+# they are penalized goodness of fit statistics. Lower
+# values indicate better fits. 
+
+AIC(my_lm, my_lmer, my_rslope)
+BIC(my_lm, my_lmer, my_rslope)
+```
+
+```{r, warning = F, message = F, results = 'asis', echo = F, eval = F}
+stargazer(my_lm, my_lmer, my_lmer2, type = "html", header = F,
+          column.labels = c("Linear","Random intercept","Random slope & intercept"))
+
+```
+
+
+It seems that including random effects does not change the parameter estimates for the Intercept or for the Days coefficients. This suggests that accounting for the hierarchical structure doesn't change our interpretation of how sleep deprivation affects reaction time. Perhaps this is a little surprising. Also importantly, the standard error for each coefficient changes when including random intercepts and random slopes. Further, the AIC and BIC is lower for the random effects models. Based on this, my conclusion is that a model with random slopes and intercepts for each Subject produces the most reliable estimate of sleep deprivation on reaction times. 
